@@ -14,17 +14,26 @@ Performance optimizations:
 """
 
 from swift.llm.dataset.dataset import register_streaming_video_dataset
+from .streaming_dataset_config import resolve_streaming_dataset_fps, resolve_streaming_dataset_path, \
+    resolve_streaming_frame_dir
 
-# Register the streaming video dataset with optimized settings
-# save_frames=True enables disk caching - first run extracts frames, subsequent runs load from disk
+
+DATASET_PATH = resolve_streaming_dataset_path()
+FRAME_OUTPUT_DIR = resolve_streaming_frame_dir()
+DATASET_FPS = resolve_streaming_dataset_fps()
+
+# Register the streaming video dataset with optimized settings.
+# save_frames=True enables disk caching - first run extracts frames, subsequent runs load from disk.
 register_streaming_video_dataset(
-    dataset_path='./dataset/example/stream_format.json',
+    dataset_path=DATASET_PATH,
     dataset_name='streaming_video',
-    fps=1.0,
+    fps=DATASET_FPS,
     max_frames=None,  # No limit
     save_frames=True,  # Enable disk caching for efficiency (recommended for multi-epoch training)
-    frame_output_dir='./dataset/stream/frames',  # Frame cache directory
+    frame_output_dir=FRAME_OUTPUT_DIR,  # Frame cache directory
     enable_memory_cache=False,  # Enable in-memory LRU cache
 )
 
-print("Registered streaming_video dataset with optimized frame extraction (disk cache enabled)")
+print(
+    'Registered streaming_video dataset with optimized frame extraction '
+    f'(dataset_path={DATASET_PATH}, frame_output_dir={FRAME_OUTPUT_DIR}, fps={DATASET_FPS})')

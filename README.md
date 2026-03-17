@@ -6,6 +6,10 @@
          📑 <a href="https://arxiv.org/abs/2512.21334">Paper</a>  &nbsp|&nbsp  🌐 <a href="https://jiaerxia.github.io/Streamo/">Web</a>  &nbsp|&nbsp 🤗 <a href="https://huggingface.co/datasets/maifoundations/Streamo-Instruct-465K">Huggingface</a>
 </p>
 
+<p align="center">
+  <a href="./README_jp.md">日本語 README</a>
+</p>
+
 This is the official implementation of the paper 'Streaming Video Instruction Tuning'.
 
 
@@ -43,9 +47,9 @@ pip install -r requirements.txt
 
 The training pipeline used by `train.sh` is:
 
-`raw annotations -> stream-format JSON with <stream> -> training-time conversion to <image> + frame cache -> swift sft`
+`raw annotations + partial local video folders -> preparation script -> stream-format JSON with <stream> -> training-time conversion to <image> + frame cache -> swift sft`
 
-This is important because `train.sh` does **not** train directly from raw annotations. It trains from a registered dataset named `streaming_video`, and that dataset is converted to frame-level `<image>` inputs during preprocessing.
+This is important because `train.sh` does **not** train directly from raw annotations. It trains from a registered dataset named `streaming_video`, and that dataset is converted to frame-level `<image>` inputs during preprocessing. When your local disk only contains a subset of the videos referenced by the labels, the preparation script filters the dataset down to the samples whose video files can actually be resolved.
 
 ### How `train.sh` Actually Reads Data
 
@@ -57,8 +61,15 @@ This is important because `train.sh` does **not** train directly from raw annota
 
 The current registration in `swift/plugin/streaming_dataset.py` points `streaming_video` to:
 
-- dataset file: `./dataset/example/stream_format.json`
+- dataset file: `./dataset/stream/stream_format.json` by default
+- fallback example file: `./dataset/example/stream_format.json` if the generated dataset does not exist
 - frame cache directory: `./dataset/stream/frames`
+
+`train.sh` exports the same defaults through environment variables:
+
+- `STREAMING_DATASET_PATH`
+- `STREAMING_FRAME_DIR`
+- `STREAMING_DATASET_FPS`
 
 During training, the registered streaming-video preprocessor:
 
@@ -137,80 +148,54 @@ See `dataset/example/` for example raw and converted files.
 
 ### Recommended Workflow for `train.sh`
 
-If you want to keep `train.sh` unchanged, use the following workflow.
+If you want to keep `train.sh` unchanged, use the preparation script and let it generate the dataset at `./dataset/stream/stream_format.json`.
 
-#### 1. Prepare one or more raw annotation files
+#### 1. Prepare labels and local media folders
 
-Create raw JSON files in the schema above. If you have multiple data sources and want to train on all of them together, the recommended default is to merge them into one combined JSON array before conversion.
+The default script assumes:
 
-#### 2. Merge raw files if needed
+- label root: `/media/lm/NO_NAME/Streamo-Instruct-465K`
+- media root: `/media/lm/NO_NAME`
 
-Example merge script:
+It scans all label JSON files, rewrites each surviving row to an absolute local `video_path`, and drops rows whose videos are unavailable locally.
 
-```bash
-python - <<'PY'
-import json
-
-inputs = ['raw_a.json', 'raw_b.json']
-merged = []
-for path in inputs:
-    with open(path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    if isinstance(data, dict):
-        merged.append(data)
-    else:
-        merged.extend(data)
-
-with open('raw_merged.json', 'w', encoding='utf-8') as f:
-    json.dump(merged, f, ensure_ascii=False, indent=2)
-PY
-```
-
-#### 3. Convert raw annotations to stream format
+#### 2. Build the training dataset from the local disk layout
 
 ```bash
-python scripts/convert_streaming_video.py to-stream \
-    --input raw_merged.json \
-    --output dataset/stream/stream_format.json \
-    --video-prefix /path/to/video/root \
+python scripts/prepare_streamo_training_data.py \
+    --label-root /media/lm/NO_NAME/Streamo-Instruct-465K \
+    --media-root /media/lm/NO_NAME \
+    --output-raw ./dataset/stream/raw_resolved.json \
+    --output-stream ./dataset/stream/stream_format.json \
+    --report-json ./dataset/stream/prepare_report.json \
     --fps 1.0 \
     --num-workers 8
 ```
 
-Use `--video-prefix` when `video_path` in the raw annotations is relative. If `video_path` is already absolute, you can omit this flag.
+This step:
 
-#### 4. Point the registered dataset to your converted JSON
+1. scans every label JSON under the label root,
+2. resolves source-specific local video paths,
+3. skips unresolved or missing-video samples,
+4. writes a merged raw JSON to `./dataset/stream/raw_resolved.json`,
+5. converts the surviving rows to stream format,
+6. writes a machine-readable report to `./dataset/stream/prepare_report.json`.
 
-Edit `swift/plugin/streaming_dataset.py` and update:
-
-- `dataset_path` to your converted stream-format JSON
-- `frame_output_dir` to the frame cache directory you want to use
-- `fps` if you intentionally trained at a different sampling rate
-
-By default, the repo uses:
-
-```python
-register_streaming_video_dataset(
-    dataset_path='./dataset/example/stream_format.json',
-    dataset_name='streaming_video',
-    fps=1.0,
-    save_frames=True,
-    frame_output_dir='./dataset/stream/frames',
-    enable_memory_cache=False,
-)
-```
-
-#### 5. Run training
+#### 3. Run training
 
 ```bash
 bash train.sh
 ```
+
+No manual edits to `swift/plugin/streaming_dataset.py` are required for the default workflow.
 
 ### `to-image` Is Not Required for `train.sh`
 
 `scripts/convert_streaming_video.py` also provides a `to-image` mode, but that is **not** required by the default training script in this repo.
 
 `train.sh` expects stream-format data with `<stream>` tokens. The registered preprocessor converts it to `<image>` format and extracts or reuses cached frames during dataset preprocessing.
+
+The new preparation script already writes stream-format JSON. `to-image` remains optional for offline inspection or custom workflows.
 
 ### Special Tokens
 
@@ -226,8 +211,8 @@ The underlying `swift` loader supports passing multiple datasets to `--dataset`,
 
 For this repo, the recommended default for mixed-source training is still:
 
-- merge all raw or converted samples into one combined stream-format JSON,
-- register that combined file as `streaming_video`,
+- build one combined stream-format JSON,
+- let `train.sh` read it through `STREAMING_DATASET_PATH`,
 - keep `train.sh` unchanged.
 
 If you need separate dataset identities, create your own registration file and register multiple streaming datasets explicitly. Example:
@@ -272,9 +257,35 @@ Mixing behavior:
 
 Do **not** rely on `--custom_dataset_info` for `<stream>` datasets unless you also provide equivalent custom preprocessing. That path uses `AutoPreprocessor`, while this repo needs the streaming-video preprocessor that extracts frames and replaces `<stream>` with `<image>`.
 
+### Local Partial-Video Support
+
+The preparation script is designed for the common local setup where the label tree is complete but only part of the referenced videos are stored on disk.
+
+Default source-specific resolution rules include:
+
+- `coin` -> `/media/lm/NO_NAME/coin/videos/{basename}`
+- `ActivityNet` -> `/media/lm/NO_NAME/activitynet/videos/{basename}`
+- `QVHighlight` -> `/media/lm/NO_NAME/QVHighlight/videos/{basename}`
+- `queryd` -> `/media/lm/NO_NAME/Queryd/videos/{basename}`
+- `didemo` -> `/media/lm/NO_NAME/didemo/videos/{basename}`
+- `tacos` -> `/media/lm/NO_NAME/tacos/videos/{basename}` or `.avi`
+- `Youcook` / `Youcookv2` -> `/media/lm/NO_NAME/youcook2/videos/{basename}.mp4`
+- `how_to_caption` -> `/media/lm/NO_NAME/how_to_caption/how_to_caption/{basename}`
+- `how_to_step` -> original path under the media root
+- `ego_timeqa` -> `/media/lm/NO_NAME/ego4d/videos_3fps_480_noaudio/{uuid_prefix}.mp4`
+
+Default exclusions and best-effort behavior:
+
+- `Koala` is excluded by default because the visible local tree does not expose video files directly.
+- `LLaVA_Video` uses exact-path resolution first, then a basename fallback under `/media/lm/NO_NAME/LLaVA_Video`.
+- If a basename fallback finds multiple candidates, the sample is skipped as ambiguous.
+- If no local match exists, the sample is skipped and counted in the report.
+
 ### Validation and Troubleshooting
 
-- Missing video files are skipped during conversion or preprocessing.
+- Missing video files are skipped during preparation or preprocessing.
+- `./dataset/stream/prepare_report.json` contains kept and dropped counts by source and reason.
+- Common drop reasons are `missing_file`, `unsupported_source`, `ambiguous_match`, and `conversion_failed`.
 - Frame count is checked against the number of `<stream>` tokens in `messages`.
 - If the difference is within tolerance, preprocessing truncates extra frames or duplicates the last frame.
 - If the difference exceeds tolerance, the sample is discarded.
@@ -284,9 +295,8 @@ Do **not** rely on `--custom_dataset_info` for `<stream>` datasets unless you al
 
 ## Quick Start▶️
 
-After updating `swift/plugin/streaming_dataset.py` to point at your converted dataset:
-
 ```bash
+python scripts/prepare_streamo_training_data.py
 bash train.sh
 ```
 

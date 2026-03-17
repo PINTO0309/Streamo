@@ -1,3 +1,6 @@
+export STREAMING_DATASET_PATH="${STREAMING_DATASET_PATH:-./dataset/stream/stream_format.json}"
+export STREAMING_FRAME_DIR="${STREAMING_FRAME_DIR:-./dataset/stream/frames}"
+export STREAMING_DATASET_FPS="${STREAMING_DATASET_FPS:-1.0}"
 export MIN_PIXELS=3136 
 export MAX_PIXELS=100352
 
