@@ -87,11 +87,13 @@ Use `scripts/convert_streaming_video.py` to convert raw data to training format:
 ```bash
 # Convert raw_data.json to stream format
 python scripts/convert_streaming_video.py to-stream \
-    --input raw_data.json \
-    --output stream_format.json \
-    --video-prefix /path/to/videos \
-    --fps 1.0
+--input raw_data.json \
+--output stream_format.json \
+--video-prefix /path/to/videos \
+--fps 1.0
 ```
+
+`--video-prefix` is the base directory prepended to each `video_path` in the input JSON. Use it when `video_path` is stored as a relative path or filename; for example, if `video_path` is `LLaVA_Video/.../sample.mp4` and `--video-prefix` is `/data`, the script will read `/data/LLaVA_Video/.../sample.mp4`. If `video_path` is already an absolute path, this argument is not needed.
 
 See `dataset/example/` for example files.
 
@@ -108,6 +110,76 @@ See `dataset/example/` for example files.
 - `<stream>` is a placeholder for the current frame, replaced with `<image>` during training
 - `<Xs-Ys>` indicates the timestamp interval of the current frame
 - Videos are sampled at 1fps, each `<stream>` corresponds to one frame
+
+## Detailed Pipeline Flow
+
+### Local Video Training Flow
+
+When `bash train.sh` is executed in the default setup, the training pipeline works as follows:
+
+1. `train.sh` launches `swift sft` with `--dataset streaming_video`.
+2. `swift/plugin/streaming_dataset.py` registers the dataset specified by `STREAM_DATASET_PATH` (default: `./dataset/stream/llava.jsonl`).
+3. Each sample is loaded from JSON/JSONL and passed to `StreamingVideoPreprocessor`.
+4. The preprocessor reads the first path from `videos`, `video`, or `video_path`.
+5. For each `<stream>` token in `messages`, the corresponding video is sampled at 1 fps.
+6. `<stream>` is replaced by `<image>`, and the extracted frames are stored in `images`.
+7. If `save_frames=True`, extracted frames are cached under `STREAM_FRAME_CACHE_DIR` so repeated epochs do not decode the same video again.
+8. The final training sample is passed to Swift as a multi-image training example.
+
+In short, the model trains on `messages + images`, while the original `videos` field is only used to lazily produce the frame sequence.
+
+### GCE/GCS Archive Training Flow
+
+This project also supports training from datasets stored in GCS as split archives such as `.tar.gz.00`, `.tar.gz.01`, ...
+
+The expected flow is:
+
+1. Prepare `llava.jsonl` as usual. The schema does not change; `videos` / `video_path` should still contain the logical relative path of the video inside the archive.
+2. Build a SQLite sidecar index from the GCS archive shards:
+
+```bash
+python scripts/build_stream_archive_index.py \
+  --gcs-prefix gs://your-bucket/path/to/archives \
+  --output ./dataset/stream/archive_index.sqlite
+```
+
+3. Enable archive resolution before running training:
+
+```bash
+export STREAM_ENABLE_ARCHIVE_RESOLUTION=1
+export STREAM_ARCHIVE_INDEX_PATH=./dataset/stream/archive_index.sqlite
+export STREAM_ARCHIVE_GCS_PREFIX=gs://your-bucket/path/to/archives
+export STREAM_ARCHIVE_CACHE_DIR=./dataset/stream/archive_cache
+export STREAM_VIDEO_CACHE_DIR=./dataset/stream/video_cache
+export STREAM_DATASET_PATH=./dataset/stream/llava.jsonl
+export STREAM_FRAME_CACHE_DIR=./dataset/stream/frames
+```
+
+4. Run `bash train.sh`.
+
+At training time, each sample is processed in this order:
+
+1. `StreamingVideoPreprocessor` reads the logical path from `videos` / `video_path`.
+2. `ArchiveVideoResolver` checks whether that path already exists locally.
+3. If not, it looks up the path in `archive_index.sqlite` and finds:
+   - which logical archive shard contains the file
+   - the member path inside that tar archive
+   - the ordered list of split parts such as `.00`, `.01`, ...
+4. The required split parts are downloaded from GCS into `STREAM_ARCHIVE_CACHE_DIR/parts/`.
+5. The parts are concatenated into a local `.tar.gz` archive under `STREAM_ARCHIVE_CACHE_DIR/archives/`.
+6. Only the requested video file is extracted from that archive into `STREAM_VIDEO_CACHE_DIR/`.
+7. The extracted local video path is then passed to the normal frame extraction pipeline.
+8. Frames are decoded at 1 fps and cached under `STREAM_FRAME_CACHE_DIR/`.
+9. `<stream>` tokens are replaced with `<image>`, and Swift receives the resulting `messages + images` sample.
+
+### Cache Behavior
+
+- `STREAM_ARCHIVE_CACHE_DIR` caches downloaded archive parts and reconstructed `.tar.gz` archives.
+- `STREAM_VIDEO_CACHE_DIR` caches extracted video files from the archives.
+- `STREAM_FRAME_CACHE_DIR` caches per-frame images used during training.
+- On repeated access, the pipeline reuses these caches instead of downloading or decoding again.
+
+This means the first epoch may spend time downloading archives, extracting videos, and decoding frames, while later epochs mostly reuse local cache.
 
 ## Quick Start▶️
 

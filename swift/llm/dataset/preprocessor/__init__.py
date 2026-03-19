@@ -3,6 +3,7 @@ from .core import (DATASET_TYPE, AlpacaPreprocessor, AutoPreprocessor, ClsPrepro
                    ResponsePreprocessor, RowPreprocessor)
 from .extra import ClsGenerationPreprocessor, GroundingMixin, TextGenerationPreprocessor
 from .streaming_video import (
+    ArchiveVideoResolver,
     StreamingVideoPreprocessor,
     StreamingVideoMessagesPreprocessor,
     VideoFrameExtractor,

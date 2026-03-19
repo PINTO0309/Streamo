@@ -16,6 +16,7 @@ dependencies = [
   "einops==0.8.2",
   "fastapi==0.128.0",
   "gradio==6.5.1",
+  "google-cloud-storage==3.4.1",
   "importlib_metadata==8.7.1",
   "jieba==0.42.1",
   "json_repair==0.55.2",

@@ -36,9 +36,15 @@ The <stream> token is replaced with <image> token, and video is extracted to fra
 """
 
 import fcntl
+import hashlib
 import json
 import os
+import posixpath
+import re
+import shutil
+import sqlite3
 import sys
+import tarfile
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -187,13 +193,239 @@ class FileLock:
         return False
 
 
+def _normalize_relative_posix_path(path: str) -> str:
+    """Normalize a logical archive/member path while rejecting traversal."""
+    normalized = posixpath.normpath(str(path).replace('\\', '/'))
+    if normalized in {'', '.'}:
+        raise ValueError('Path must not be empty')
+    normalized = normalized.lstrip('/')
+    if normalized in {'', '.'} or normalized == '..' or normalized.startswith('../'):
+        raise ValueError(f'Path escapes archive root: {path}')
+    return normalized
+
+
+def _parse_gs_uri(gs_uri: str) -> Tuple[str, str]:
+    """Parse a gs:// URI into bucket and prefix."""
+    match = re.match(r'^gs://([^/]+)(?:/(.*))?$', gs_uri)
+    if not match:
+        raise ValueError(f'Invalid GCS URI: {gs_uri}')
+    bucket = match.group(1)
+    prefix = (match.group(2) or '').strip('/')
+    return bucket, prefix
+
+
+def _join_gcs_object_path(prefix: str, relative_path: str) -> str:
+    relative_path = _normalize_relative_posix_path(relative_path)
+    if not prefix:
+        return relative_path
+    return f'{prefix.rstrip("/")}/{relative_path}'
+
+
+def _write_marker(marker_path: str, content: str = 'done\n') -> None:
+    marker_dir = os.path.dirname(marker_path)
+    if marker_dir:
+        os.makedirs(marker_dir, exist_ok=True)
+    with open(marker_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+
+class ArchiveVideoResolver:
+    """Resolve logical video paths from a split tar archive stored in GCS."""
+
+    def __init__(
+        self,
+        index_path: str,
+        archive_cache_dir: str,
+        video_cache_dir: str,
+        gcs_prefix: Optional[str] = None,
+        storage_client: Optional[Any] = None,
+    ):
+        self.index_path = os.path.abspath(os.path.expanduser(index_path))
+        self.archive_cache_dir = os.path.abspath(os.path.expanduser(archive_cache_dir))
+        self.video_cache_dir = os.path.abspath(os.path.expanduser(video_cache_dir))
+        self.gcs_prefix = gcs_prefix
+        self._storage_client = storage_client
+
+        self._parts_dir = os.path.join(self.archive_cache_dir, 'parts')
+        self._archives_dir = os.path.join(self.archive_cache_dir, 'archives')
+        self._locks_dir = os.path.join(self.archive_cache_dir, 'locks')
+        self._video_locks_dir = os.path.join(self.video_cache_dir, '.locks')
+
+        for path in [self.archive_cache_dir, self.video_cache_dir, self._parts_dir, self._archives_dir, self._locks_dir,
+                     self._video_locks_dir]:
+            os.makedirs(path, exist_ok=True)
+
+    def _get_storage_client(self):
+        if self._storage_client is None:
+            from google.cloud import storage
+            self._storage_client = storage.Client()
+        return self._storage_client
+
+    @staticmethod
+    def _get_lock_path(base_dir: str, key: str) -> str:
+        digest = hashlib.sha1(key.encode('utf-8')).hexdigest()
+        return os.path.join(base_dir, f'{digest}.lock')
+
+    @staticmethod
+    def _candidate_member_names(member_path: str) -> List[str]:
+        normalized = _normalize_relative_posix_path(member_path)
+        candidates = [member_path, normalized, f'./{normalized}']
+        deduped = []
+        for candidate in candidates:
+            if candidate not in deduped:
+                deduped.append(candidate)
+        return deduped
+
+    def _query_index(self, logical_path: str) -> Optional[Dict[str, Any]]:
+        logical_path = _normalize_relative_posix_path(logical_path)
+        if not os.path.exists(self.index_path):
+            raise FileNotFoundError(f'Archive index not found: {self.index_path}')
+
+        query = """
+            SELECT f.logical_path, f.archive_id, f.member_path, a.gcs_prefix, a.archive_stem, a.parts_json
+            FROM files AS f
+            JOIN archives AS a ON f.archive_id = a.archive_id
+            WHERE f.logical_path = ?
+        """
+        with sqlite3.connect(self.index_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(query, (logical_path,)).fetchone()
+
+        if row is None:
+            return None
+
+        parts = json.loads(row['parts_json'])
+        if not isinstance(parts, list) or len(parts) == 0:
+            raise ValueError(f'Archive `{row["archive_id"]}` has no parts registered')
+
+        record = dict(row)
+        record['logical_path'] = logical_path
+        record['member_path'] = _normalize_relative_posix_path(record['member_path'])
+        record['archive_stem'] = _normalize_relative_posix_path(record['archive_stem'])
+        record['parts'] = [_normalize_relative_posix_path(part) for part in parts]
+        if self.gcs_prefix:
+            record['gcs_prefix'] = self.gcs_prefix
+        return record
+
+    def _download_parts(self, record: Dict[str, Any]) -> List[str]:
+        bucket_name, blob_prefix = _parse_gs_uri(record['gcs_prefix'])
+        client = self._get_storage_client()
+        bucket = client.bucket(bucket_name)
+
+        part_paths = []
+        for relative_part in record['parts']:
+            local_part_path = os.path.join(self._parts_dir, relative_part.replace('/', os.sep))
+            os.makedirs(os.path.dirname(local_part_path), exist_ok=True)
+            part_paths.append(local_part_path)
+            if os.path.exists(local_part_path):
+                continue
+
+            blob_name = _join_gcs_object_path(blob_prefix, relative_part)
+            blob = bucket.blob(blob_name)
+            tmp_path = f'{local_part_path}.tmp'
+            try:
+                blob.download_to_filename(tmp_path)
+                os.replace(tmp_path, local_part_path)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+        return part_paths
+
+    def _prepare_archive(self, record: Dict[str, Any]) -> str:
+        archive_path = os.path.join(self._archives_dir, record['archive_stem'].replace('/', os.sep))
+        done_marker = f'{archive_path}.done'
+        lock_path = self._get_lock_path(self._locks_dir, f'archive:{record["archive_id"]}')
+
+        if os.path.exists(archive_path) and os.path.exists(done_marker):
+            return archive_path
+
+        with FileLock(lock_path):
+            if os.path.exists(archive_path) and os.path.exists(done_marker):
+                return archive_path
+
+            os.makedirs(os.path.dirname(archive_path), exist_ok=True)
+            part_paths = self._download_parts(record)
+            tmp_archive_path = f'{archive_path}.tmp'
+            try:
+                with open(tmp_archive_path, 'wb') as archive_file:
+                    for part_path in part_paths:
+                        with open(part_path, 'rb') as part_file:
+                            shutil.copyfileobj(part_file, archive_file, length=4 * 1024 * 1024)
+                os.replace(tmp_archive_path, archive_path)
+            finally:
+                if os.path.exists(tmp_archive_path):
+                    os.remove(tmp_archive_path)
+
+            _write_marker(done_marker, f'archive_id={record["archive_id"]}\n')
+
+        return archive_path
+
+    def _extract_member(self, record: Dict[str, Any], archive_path: str) -> str:
+        target_video_path = os.path.join(self.video_cache_dir, record['logical_path'].replace('/', os.sep))
+        done_marker = f'{target_video_path}.done'
+        lock_path = self._get_lock_path(self._video_locks_dir, f'video:{record["logical_path"]}')
+
+        if os.path.exists(target_video_path) and os.path.exists(done_marker):
+            return target_video_path
+
+        with FileLock(lock_path):
+            if os.path.exists(target_video_path) and os.path.exists(done_marker):
+                return target_video_path
+
+            os.makedirs(os.path.dirname(target_video_path), exist_ok=True)
+
+            member = None
+            with tarfile.open(archive_path, 'r:gz') as tar:
+                for candidate in self._candidate_member_names(record['member_path']):
+                    try:
+                        member = tar.getmember(candidate)
+                        break
+                    except KeyError:
+                        continue
+
+                if member is None:
+                    raise FileNotFoundError(
+                        f'Member `{record["member_path"]}` not found in archive `{record["archive_id"]}`')
+                if not member.isfile():
+                    raise ValueError(f'Member `{record["member_path"]}` is not a regular file')
+
+                extracted = tar.extractfile(member)
+                if extracted is None:
+                    raise ValueError(f'Failed to read member `{record["member_path"]}` from archive')
+
+                tmp_video_path = f'{target_video_path}.tmp'
+                try:
+                    with extracted, open(tmp_video_path, 'wb') as out_file:
+                        shutil.copyfileobj(extracted, out_file, length=4 * 1024 * 1024)
+                    os.replace(tmp_video_path, target_video_path)
+                finally:
+                    if os.path.exists(tmp_video_path):
+                        os.remove(tmp_video_path)
+
+            _write_marker(done_marker, f'archive_id={record["archive_id"]}\nmember={record["member_path"]}\n')
+
+        return target_video_path
+
+    def resolve(self, logical_path: str) -> str:
+        if os.path.exists(logical_path):
+            return logical_path
+
+        record = self._query_index(logical_path)
+        if record is None:
+            raise FileNotFoundError(f'Logical video path not found in archive index: {logical_path}')
+
+        archive_path = self._prepare_archive(record)
+        return self._extract_member(record, archive_path)
+
+
 def _save_frame_worker(args: Tuple[str, np.ndarray]) -> str:
     """Worker function to save a single frame to disk."""
     frame_path, frame = args
     # Write to temp file first, then rename for atomicity
-    temp_path = frame_path + '.tmp'
+    base, ext = os.path.splitext(frame_path)
+    temp_path = f'{base}.tmp{ext}'
     cv2.imwrite(temp_path, frame)
-    os.rename(temp_path, frame_path)
+    os.replace(temp_path, frame_path)
     return frame_path
 
 
@@ -615,6 +847,7 @@ class StreamingVideoPreprocessor(RowPreprocessor):
         num_workers: int = 8,  # Number of threads for parallel frame saving
         enable_memory_cache: bool = True,  # Enable in-memory caching for multi-epoch training
         frame_tolerance: int = 1,  # Tolerance in frames for count mismatch (default: 1 second at 1fps)
+        video_resolver: Optional[ArchiveVideoResolver] = None,
         columns: Optional[Dict[str, str]] = None,
         **kwargs
     ):
@@ -628,6 +861,7 @@ class StreamingVideoPreprocessor(RowPreprocessor):
             num_workers: Number of threads for parallel frame saving
             enable_memory_cache: Enable in-memory caching to avoid re-decoding videos (for multi-epoch)
             frame_tolerance: Allowed difference between extracted frames and expected tokens (default: 1)
+            video_resolver: Optional resolver that materializes logical video paths locally
             columns: Column mapping
         """
         super().__init__(columns=columns, **kwargs)
@@ -638,6 +872,7 @@ class StreamingVideoPreprocessor(RowPreprocessor):
         self.num_workers = num_workers
         self.enable_memory_cache = enable_memory_cache
         self.frame_tolerance = frame_tolerance
+        self.video_resolver = video_resolver
         
         self.frame_extractor = VideoFrameExtractor(
             fps=fps,
@@ -731,6 +966,13 @@ class StreamingVideoPreprocessor(RowPreprocessor):
             if not video_path:
                 logger.warning(f"No video path found in row")
                 return None
+
+            if self.video_resolver is not None:
+                try:
+                    video_path = self.video_resolver.resolve(video_path)
+                except Exception as e:
+                    logger.warning(f"Failed to resolve video `{video_path}` from archive: {e}")
+                    return None
             
             if not os.path.exists(video_path):
                 logger.warning(f"Video not found: {video_path}")
@@ -810,6 +1052,7 @@ class StreamingVideoMessagesPreprocessor(MessagesPreprocessor):
         num_workers: int = 8,  # Number of threads for parallel frame saving
         enable_memory_cache: bool = True,  # Enable in-memory caching for multi-epoch training
         frame_tolerance: int = 1,  # Tolerance in frames for count mismatch
+        video_resolver: Optional[ArchiveVideoResolver] = None,
         # MessagesPreprocessor args
         role_key: Optional[str] = None,
         content_key: Optional[str] = None,
@@ -839,6 +1082,7 @@ class StreamingVideoMessagesPreprocessor(MessagesPreprocessor):
             num_workers=num_workers,
             enable_memory_cache=enable_memory_cache,
             frame_tolerance=frame_tolerance,
+            video_resolver=video_resolver,
         )
     
     def _has_stream_token(self, row: Dict[str, Any]) -> bool:

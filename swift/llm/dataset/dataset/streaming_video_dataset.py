@@ -5,11 +5,14 @@ Streaming Video Dataset Registration
 This module registers streaming video datasets for swift training.
 """
 
-from ..preprocessor import StreamingVideoPreprocessor, StreamingVideoMessagesPreprocessor
+from typing import Optional
+
+from ..preprocessor import ArchiveVideoResolver, StreamingVideoPreprocessor, StreamingVideoMessagesPreprocessor
 from ..register import DatasetMeta, register_dataset
 
 # Re-export for convenience
 __all__ = [
+    'ArchiveVideoResolver',
     'StreamingVideoPreprocessor',
     'StreamingVideoMessagesPreprocessor',
     'register_streaming_video_dataset',
@@ -25,6 +28,7 @@ def register_streaming_video_dataset(
     save_frames: bool = False,
     num_workers: int = 8,  # Number of threads for parallel frame saving
     enable_memory_cache: bool = True,  # Enable in-memory LRU cache
+    video_resolver: Optional[ArchiveVideoResolver] = None,
     **kwargs
 ) -> DatasetMeta:
     """
@@ -39,6 +43,7 @@ def register_streaming_video_dataset(
         save_frames: Whether to save frames to disk (False = in-memory PIL images)
         num_workers: Number of threads for parallel frame saving
         enable_memory_cache: Enable in-memory LRU cache for repeated access (default: True)
+        video_resolver: Optional resolver for archive-backed logical video paths
         **kwargs: Additional DatasetMeta arguments
         
     Returns:
@@ -61,6 +66,7 @@ def register_streaming_video_dataset(
         save_frames=save_frames,
         num_workers=num_workers,
         enable_memory_cache=enable_memory_cache,
+        video_resolver=video_resolver,
     )
     
     meta = DatasetMeta(
