@@ -13,48 +13,55 @@ Performance optimizations:
 - Optimized seek-based frame extraction (only reads target frames, not all frames)
 """
 
-import os
-
 from swift.llm.dataset.dataset import ArchiveVideoResolver, register_streaming_video_dataset
+from .streaming_dataset_config import (
+    resolve_streaming_archive_cache_dir,
+    resolve_streaming_archive_gcs_prefix,
+    resolve_streaming_archive_index_path,
+    resolve_streaming_dataset_fps,
+    resolve_streaming_dataset_path,
+    resolve_streaming_enable_archive_resolution,
+    resolve_streaming_enable_memory_cache,
+    resolve_streaming_frame_dir,
+    resolve_streaming_video_cache_dir,
+)
 
 
-def _env_flag(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
-
-
-dataset_path = os.getenv('STREAM_DATASET_PATH', './dataset/stream/llava.jsonl')
-frame_output_dir = os.getenv('STREAM_FRAME_CACHE_DIR', './dataset/stream/frames')
+DATASET_PATH = resolve_streaming_dataset_path()
+FRAME_OUTPUT_DIR = resolve_streaming_frame_dir()
+DATASET_FPS = resolve_streaming_dataset_fps()
+ENABLE_MEMORY_CACHE = resolve_streaming_enable_memory_cache()
 
 video_resolver = None
-if _env_flag('STREAM_ENABLE_ARCHIVE_RESOLUTION', default=False):
-    index_path = os.getenv('STREAM_ARCHIVE_INDEX_PATH')
+if resolve_streaming_enable_archive_resolution():
+    index_path = resolve_streaming_archive_index_path()
     if index_path:
         video_resolver = ArchiveVideoResolver(
             index_path=index_path,
-            archive_cache_dir=os.getenv('STREAM_ARCHIVE_CACHE_DIR', './dataset/stream/archive_cache'),
-            video_cache_dir=os.getenv('STREAM_VIDEO_CACHE_DIR', './dataset/stream/video_cache'),
-            gcs_prefix=os.getenv('STREAM_ARCHIVE_GCS_PREFIX') or None,
+            archive_cache_dir=resolve_streaming_archive_cache_dir(),
+            video_cache_dir=resolve_streaming_video_cache_dir(),
+            gcs_prefix=resolve_streaming_archive_gcs_prefix() or None,
         )
     else:
-        print('STREAM_ENABLE_ARCHIVE_RESOLUTION=1 but STREAM_ARCHIVE_INDEX_PATH is not set; '
+        print('Archive resolution is enabled but no archive index path is set; '
               'falling back to local video paths.')
 
-# Register the streaming video dataset with optimized settings
-# save_frames=True enables disk caching - first run extracts frames, subsequent runs load from disk
+
+# Register the streaming video dataset with optimized settings.
+# save_frames=True enables disk caching: first run extracts frames, subsequent runs load from disk.
 register_streaming_video_dataset(
-    dataset_path=dataset_path,
+    dataset_path=DATASET_PATH,
     dataset_name='streaming_video',
-    fps=1.0,
+    fps=DATASET_FPS,
     max_frames=None,  # No limit
     save_frames=True,  # Enable disk caching for efficiency (recommended for multi-epoch training)
-    frame_output_dir=frame_output_dir,  # Frame cache directory
-    enable_memory_cache=True,  # Enable in-memory LRU cache
+    frame_output_dir=FRAME_OUTPUT_DIR,  # Frame cache directory
+    enable_memory_cache=ENABLE_MEMORY_CACHE,
     video_resolver=video_resolver,
 )
 
-print(f"Registered streaming_video dataset with optimized frame extraction "
-      f"(dataset_path={dataset_path}, frame_output_dir={frame_output_dir}, "
-      f"archive_resolution={'enabled' if video_resolver is not None else 'disabled'})")
+print(
+    'Registered streaming_video dataset with optimized frame extraction '
+    f'(dataset_path={DATASET_PATH}, frame_output_dir={FRAME_OUTPUT_DIR}, fps={DATASET_FPS}, '
+    f'memory_cache={"enabled" if ENABLE_MEMORY_CACHE else "disabled"}, '
+    f'archive_resolution={"enabled" if video_resolver is not None else "disabled"})')

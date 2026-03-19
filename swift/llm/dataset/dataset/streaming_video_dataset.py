@@ -7,7 +7,7 @@ This module registers streaming video datasets for swift training.
 
 from typing import Optional
 
-from ..preprocessor import ArchiveVideoResolver, StreamingVideoPreprocessor, StreamingVideoMessagesPreprocessor
+from ..preprocessor import ArchiveVideoResolver, StreamingVideoMessagesPreprocessor, StreamingVideoPreprocessor
 from ..register import DatasetMeta, register_dataset
 
 # Re-export for convenience
@@ -27,13 +27,13 @@ def register_streaming_video_dataset(
     frame_output_dir: str = None,
     save_frames: bool = False,
     num_workers: int = 8,  # Number of threads for parallel frame saving
-    enable_memory_cache: bool = True,  # Enable in-memory LRU cache
+    enable_memory_cache: bool = False,  # Enable in-memory LRU cache
     video_resolver: Optional[ArchiveVideoResolver] = None,
     **kwargs
 ) -> DatasetMeta:
     """
     Register a streaming video dataset.
-    
+
     Args:
         dataset_path: Path to JSON data file
         dataset_name: Name for the dataset
@@ -42,22 +42,12 @@ def register_streaming_video_dataset(
         frame_output_dir: Directory to save extracted frames (only used if save_frames=True)
         save_frames: Whether to save frames to disk (False = in-memory PIL images)
         num_workers: Number of threads for parallel frame saving
-        enable_memory_cache: Enable in-memory LRU cache for repeated access (default: True)
+        enable_memory_cache: Enable in-memory LRU cache for repeated access (default: False)
         video_resolver: Optional resolver for archive-backed logical video paths
         **kwargs: Additional DatasetMeta arguments
-        
+
     Returns:
         Registered DatasetMeta
-        
-    Example:
-        register_streaming_video_dataset(
-            dataset_path='/path/to/data.json',
-            dataset_name='my_streaming_video',
-            fps=1.0,
-            save_frames=True,  # Enable disk caching
-            frame_output_dir='./frames',
-            enable_memory_cache=True,  # Enable memory cache
-        )
     """
     preprocessor = StreamingVideoPreprocessor(
         fps=fps,
@@ -68,7 +58,7 @@ def register_streaming_video_dataset(
         enable_memory_cache=enable_memory_cache,
         video_resolver=video_resolver,
     )
-    
+
     meta = DatasetMeta(
         dataset_path=dataset_path,
         dataset_name=dataset_name,
@@ -76,6 +66,6 @@ def register_streaming_video_dataset(
         tags=['streaming-video', 'multi-modal', 'video'],
         **kwargs
     )
-    
+
     register_dataset(meta)
     return meta
