@@ -169,7 +169,7 @@ hf download maifoundations/Streamo-Instruct-465K \
 ########## アーカイブモード用
 # 1. まずアーカイブインデックスを構築
 python scripts/build_stream_archive_index.py \
---gcs-prefix gs://your-bucket/datasets \
+--gcs-prefix gs://xxxxx-persistent/datasets \
 --output ./dataset/stream/archive_index.sqlite
 
 # 2. アーカイブモードでデータセットを準備
