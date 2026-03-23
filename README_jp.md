@@ -289,6 +289,80 @@ swift sft \
 - `save_frames=True` の場合、初回実行時にフレームをディスクへ抽出し、その後はキャッシュを再利用します。
 - データセットの内容を差し替えた場合は、キャッシュディレクトリもそのデータセットに対応したものになっていることを確認してください。
 
+### Detailed Pipeline Flow
+
+#### Local Video Training Flow
+
+既定の構成で `bash train.sh` を実行した場合、学習パイプラインは次のように動作します。
+
+1. `train.sh` が `--dataset streaming_video` を付けて `swift sft` を起動する
+2. `swift/plugin/streaming_dataset.py` が `STREAMING_DATASET_PATH` で指定されたデータセットを登録する
+3. 各サンプルは JSON/JSONL から読み込まれ、`StreamingVideoPreprocessor` に渡される
+4. preprocessor は `videos`、`video`、`video_path` のいずれかから最初の動画パスを読む
+5. `messages` 内の各 `<stream>` トークンに対して、対応する動画を `STREAMING_DATASET_FPS` でサンプリングする
+6. `<stream>` は `<image>` に置換され、抽出されたフレームは `images` に格納される
+7. `save_frames=True` の場合、抽出済みフレームは `STREAMING_FRAME_DIR` にキャッシュされる
+8. 最終的な学習サンプルは multi-image 形式として Swift に渡される
+
+要するに、モデルが実際に学習するのは `messages + images` であり、元の `videos` フィールドはフレーム列を遅延生成するためだけに使われます。
+
+#### GCE/GCS Archive Training Flow
+
+このプロジェクトは、`.tar.gz.00`、`.tar.gz.01` のように分割された archive として GCS に保存された動画データセットから学習する構成にも対応しています。
+
+期待される手順は次の通りです。
+
+1. まず `stream_format.json` を用意します。スキーマは変わりませんが、`videos` / `video_path` にはローカル絶対パスではなく、archive 内の logical relative path を入れてください。
+2. GCS 上の archive shard から SQLite の sidecar index を作成します。
+
+```bash
+python scripts/build_stream_archive_index.py \
+    --gcs-prefix gs://your-bucket/path/to/archives \
+    --output ./dataset/stream/archive_index.sqlite
+```
+
+3. 学習前に archive resolution を有効化します。
+
+```bash
+export STREAMING_ENABLE_ARCHIVE_RESOLUTION=1
+export STREAMING_ARCHIVE_INDEX_PATH=./dataset/stream/archive_index.sqlite
+export STREAMING_ARCHIVE_GCS_PREFIX=gs://your-bucket/path/to/archives
+export STREAMING_ARCHIVE_CACHE_DIR=./dataset/stream/archive_cache
+export STREAMING_VIDEO_CACHE_DIR=./dataset/stream/video_cache
+export STREAMING_DATASET_PATH=./dataset/stream/stream_format.json
+export STREAMING_FRAME_DIR=./dataset/stream/frames
+```
+
+以前の archive tooling との互換性のため、`STREAM_*` 環境変数名も引き続き使用できます。
+
+4. `bash train.sh` を実行します。
+
+学習時には、各サンプルが次の順序で処理されます。
+
+1. `StreamingVideoPreprocessor` が `videos` / `video_path` から logical path を読み取る
+2. `ArchiveVideoResolver` が、そのパスがすでにローカルに存在するかを確認する
+3. ローカルに無ければ `archive_index.sqlite` を引き、どの archive shard に入っているか、archive 内 member path は何か、`.00`、`.01` のような分割 part の順序はどうなっているかを取得する
+4. 必要な part を `STREAMING_ARCHIVE_CACHE_DIR/parts/` に GCS からダウンロードする
+5. それらを連結して、ローカルの `.tar.gz` archive を `STREAMING_ARCHIVE_CACHE_DIR/archives/` に復元する
+6. 必要な動画ファイルだけをその archive から `STREAMING_VIDEO_CACHE_DIR/` に抽出する
+7. 抽出済みのローカル動画パスを通常のフレーム抽出パイプラインへ渡す
+8. フレームは設定済み FPS でデコードされ、`STREAMING_FRAME_DIR/` にキャッシュされる
+9. `<stream>` は `<image>` に置換され、Swift には `messages + images` サンプルが渡される
+
+#### Cache Behavior
+
+- `STREAMING_ARCHIVE_CACHE_DIR` には、ダウンロード済み archive part と復元済み `.tar.gz` archive がキャッシュされます。
+- `STREAMING_VIDEO_CACHE_DIR` には、archive から抽出済みの動画ファイルがキャッシュされます。
+- `STREAMING_FRAME_DIR` には、学習で使うフレーム画像がキャッシュされます。
+- 同じデータに再度アクセスした場合、パイプラインはこれらのキャッシュを再利用するため、再ダウンロードや再デコードを避けられます。
+
+そのため、初回 epoch は archive のダウンロード、動画抽出、フレームデコードに時間を使いますが、以後の epoch では主にローカルキャッシュが再利用されます。
+
+補足:
+
+- `README_jp.md` の前半で説明している `scripts/prepare_streamo_training_data.py` は、あくまでローカル動画配置を前提に `stream_format.json` を組み立てるスクリプトです。
+- archive/GCS フローで使うのは学習時の preprocessor 側の解決機構であり、`stream_format.json` 自体は logical relative path を保持した状態で用意する必要があります。
+
 ## Quick Start▶️
 
 ```bash
