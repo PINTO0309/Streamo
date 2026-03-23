@@ -162,14 +162,18 @@ It scans all label JSON files, rewrites each surviving row to an absolute local 
 #### 2. Build the training dataset from the local disk layout
 
 ```bash
+hf download maifoundations/Streamo-Instruct-465K \
+--repo-type dataset \
+--local-dir dataset/Streamo-Instruct-465K
+
 python scripts/prepare_streamo_training_data.py \
-    --label-root /media/lm/NO_NAME/Streamo-Instruct-465K \
-    --media-root /media/lm/NO_NAME \
-    --output-raw ./dataset/stream/raw_resolved.json \
-    --output-stream ./dataset/stream/stream_format.json \
-    --report-json ./dataset/stream/prepare_report.json \
-    --fps 1.0 \
-    --num-workers 8
+--label-root /media/lm/NO_NAME/Streamo-Instruct-465K \
+--media-root /media/lm/NO_NAME \
+--output-raw ./dataset/stream/raw_resolved.json \
+--output-stream ./dataset/stream/stream_format.json \
+--report-json ./dataset/stream/prepare_report.json \
+--fps 1.0 \
+--num-workers 8
 ```
 
 This step:
