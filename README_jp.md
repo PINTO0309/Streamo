@@ -161,6 +161,7 @@ raw / converted の例は `dataset/example/` を参照してください。
 source /mnt/data/venv/bin/activate
 hf auth login
 
+# 変換前ラベルファイルのダウンロード
 hf download maifoundations/Streamo-Instruct-465K \
 --repo-type dataset \
 --local-dir dataset/Streamo-Instruct-465K
