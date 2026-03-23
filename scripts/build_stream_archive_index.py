@@ -17,7 +17,9 @@ import re
 import sqlite3
 import sys
 import tarfile
+import threading
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
@@ -184,6 +186,7 @@ def _stream_archive_members(
     archive_stem: str,
     parts: List[str],
     storage_client: Optional[Any] = None,
+    tqdm_position: Optional[int] = None,
 ) -> List[str]:
     """Stream a (possibly split) tar.gz from GCS and return member file paths.
 
@@ -212,6 +215,7 @@ def _stream_archive_members(
             unit_divisor=1024,
             leave=False,
             dynamic_ncols=True,
+            position=tqdm_position,
         )
         with progress, _ProgressStream(raw_stream, progress) as stream:
             # 'r|gz' is the sequential/streaming mode — no seeking required.
@@ -255,11 +259,14 @@ def build_archive_index(
     output_path: str,
     scratch_dir: Optional[str] = None,
     storage_client: Optional[Any] = None,
+    num_workers: int = 1,
 ) -> str:
     """Build a SQLite index by streaming archives from GCS.
 
     ``scratch_dir`` is accepted for backward compatibility but ignored —
     archives are no longer downloaded to local disk.
+
+    ``num_workers`` controls how many archives are streamed in parallel.
     """
     del scratch_dir  # no longer used
 
@@ -276,37 +283,78 @@ def build_archive_index(
     if os.path.exists(temp_output):
         os.remove(temp_output)
 
-    with sqlite3.connect(temp_output) as conn:
-        _create_schema(conn)
+    num_workers = max(1, num_workers)
+    sorted_stems = sorted(archive_parts)
 
-        sorted_stems = sorted(archive_parts)
-        for archive_stem in tqdm(sorted_stems, desc='Processing archives',
-                                 unit=' archives', dynamic_ncols=True):
-            parts = archive_parts[archive_stem]
-            archive_id = archive_stem
+    # -- tqdm position pool for concurrent per-archive progress bars --------
+    _position_lock = threading.Lock()
+    _free_positions: List[int] = list(range(1, num_workers + 1))
 
-            member_paths = _stream_archive_members(
+    def _acquire_position() -> int:
+        with _position_lock:
+            return _free_positions.pop(0)
+
+    def _release_position(pos: int) -> None:
+        with _position_lock:
+            _free_positions.append(pos)
+
+    def _worker(archive_stem: str) -> Tuple[str, List[str], List[str]]:
+        parts = archive_parts[archive_stem]
+        pos = _acquire_position()
+        try:
+            members = _stream_archive_members(
                 gcs_prefix=gcs_prefix,
                 archive_stem=archive_stem,
                 parts=parts,
                 storage_client=storage_client,
+                tqdm_position=pos,
             )
+        finally:
+            _release_position(pos)
+        return archive_stem, parts, members
 
-            conn.execute(
-                'INSERT INTO archives (archive_id, gcs_prefix, archive_stem, parts_json) VALUES (?, ?, ?, ?)',
-                (archive_id, gcs_prefix, archive_stem, json.dumps(parts, ensure_ascii=False)))
+    # -- run workers and collect results into SQLite ------------------------
+    with sqlite3.connect(temp_output) as conn:
+        _create_schema(conn)
 
-            rows = [(mp, archive_id, mp) for mp in member_paths]
-            try:
-                conn.executemany(
-                    'INSERT INTO files (logical_path, archive_id, member_path) VALUES (?, ?, ?)',
-                    rows)
-            except sqlite3.IntegrityError as e:
-                raise ValueError(
-                    f'Duplicate logical_path detected while indexing `{archive_stem}`: {e}') from e
+        overall = tqdm(
+            total=len(sorted_stems),
+            desc='Processing archives',
+            unit=' archives',
+            dynamic_ncols=True,
+            position=0,
+        )
+        with overall:
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                futures = {
+                    executor.submit(_worker, stem): stem
+                    for stem in sorted_stems
+                }
+                for future in as_completed(futures):
+                    archive_stem, parts, member_paths = future.result()
+                    archive_id = archive_stem
 
-            conn.commit()
-            logger.info(f'Indexed {len(rows)} files from `{archive_stem}`')
+                    conn.execute(
+                        'INSERT INTO archives (archive_id, gcs_prefix, archive_stem, parts_json) '
+                        'VALUES (?, ?, ?, ?)',
+                        (archive_id, gcs_prefix, archive_stem,
+                         json.dumps(parts, ensure_ascii=False)))
+
+                    rows = [(mp, archive_id, mp) for mp in member_paths]
+                    try:
+                        conn.executemany(
+                            'INSERT INTO files (logical_path, archive_id, member_path) '
+                            'VALUES (?, ?, ?)',
+                            rows)
+                    except sqlite3.IntegrityError as e:
+                        raise ValueError(
+                            f'Duplicate logical_path detected while indexing '
+                            f'`{archive_stem}`: {e}') from e
+
+                    conn.commit()
+                    overall.update(1)
+                    overall.set_postfix(last=archive_stem, refresh=False)
+                    logger.info(f'Indexed {len(rows)} files from `{archive_stem}`')
 
     os.replace(temp_output, output_path)
     logger.info(f'Saved archive index to {output_path}')
@@ -317,6 +365,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Build a SQLite index for split tar.gz archives in GCS')
     parser.add_argument('--gcs-prefix', required=True, help='GCS prefix that contains archive shard parts')
     parser.add_argument('--output', required=True, help='Output SQLite path')
+    parser.add_argument('--num-workers', type=int, default=1,
+                        help='Number of archives to stream in parallel (default: 1)')
     parser.add_argument('--scratch-dir', help='(ignored) Kept for backward compatibility')
     return parser.parse_args()
 
@@ -327,6 +377,7 @@ def main() -> int:
         gcs_prefix=args.gcs_prefix,
         output_path=args.output,
         scratch_dir=args.scratch_dir,
+        num_workers=args.num_workers,
     )
     return 0
 
