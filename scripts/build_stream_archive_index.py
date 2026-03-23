@@ -79,7 +79,7 @@ def _list_archive_parts(gcs_prefix: str, storage_client: Optional[Any] = None) -
 
     groups: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
     for blob in tqdm(client.list_blobs(bucket_name, prefix=blob_prefix),
-                     desc='Listing GCS blobs', unit=' blobs'):
+                     desc='Listing GCS blobs', unit=' blobs', dynamic_ncols=True):
         relative_name = blob.name
         if blob_prefix:
             relative_name = relative_name[len(blob_prefix):].lstrip('/')
@@ -211,6 +211,7 @@ def _stream_archive_members(
             unit_scale=True,
             unit_divisor=1024,
             leave=False,
+            dynamic_ncols=True,
         )
         with progress, _ProgressStream(raw_stream, progress) as stream:
             # 'r|gz' is the sequential/streaming mode — no seeking required.
@@ -280,7 +281,7 @@ def build_archive_index(
 
         sorted_stems = sorted(archive_parts)
         for archive_stem in tqdm(sorted_stems, desc='Processing archives',
-                                 unit=' archives'):
+                                 unit=' archives', dynamic_ncols=True):
             parts = archive_parts[archive_stem]
             archive_id = archive_stem
 
