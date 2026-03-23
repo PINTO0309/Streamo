@@ -14,9 +14,19 @@ import tempfile
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
-from swift.utils import get_logger
+import logging
+import sys
 
-logger = get_logger()
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+try:
+    from swift.utils import get_logger
+    logger = get_logger()
+except ModuleNotFoundError:
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 PART_SUFFIX_RE = re.compile(r'^(?P<stem>.+\.tar\.gz)\.(?P<part>\d+)$')
 
