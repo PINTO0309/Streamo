@@ -158,6 +158,9 @@ raw / converted の例は `dataset/example/` を参照してください。
 #### 2. ローカルディスク配置から学習データセットを構築する
 
 ```bash
+source /mnt/data/venv/bin/activate
+hf auth login
+
 hf download maifoundations/Streamo-Instruct-465K \
 --repo-type dataset \
 --local-dir dataset/Streamo-Instruct-465K
