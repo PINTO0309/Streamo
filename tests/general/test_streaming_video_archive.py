@@ -90,6 +90,10 @@ class FakeBlob:
     def __init__(self, client, name: str):
         self._client = client
         self.name = name
+        self.size = len(client.objects.get(name, b''))
+
+    def reload(self):
+        self.size = len(self._client.objects.get(self.name, b''))
 
     def open(self, mode: str = 'rb'):
         assert mode == 'rb'

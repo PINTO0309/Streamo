@@ -139,9 +139,49 @@ class _ConcatenatedStream:
         self.close()
 
 
+class _ProgressStream:
+    """Wrap a readable stream with a tqdm byte-level progress bar."""
+
+    def __init__(self, stream: _ConcatenatedStream, progress: tqdm):
+        self._stream = stream
+        self._progress = progress
+
+    def read(self, size: int = -1) -> bytes:
+        data = self._stream.read(size)
+        self._progress.update(len(data))
+        return data
+
+    def close(self) -> None:
+        self._stream.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+def _get_total_blob_size(
+    bucket,
+    blob_prefix: str,
+    parts: List[str],
+) -> Optional[int]:
+    """Return combined byte size of all parts, or None if unavailable."""
+    total = 0
+    for part in parts:
+        object_name = _join_gcs_object_path(blob_prefix, part)
+        blob = bucket.blob(object_name)
+        blob.reload()
+        if blob.size is None:
+            return None
+        total += blob.size
+    return total
+
+
 def _stream_archive_members(
     *,
     gcs_prefix: str,
+    archive_stem: str,
     parts: List[str],
     storage_client: Optional[Any] = None,
 ) -> List[str]:
@@ -154,6 +194,8 @@ def _stream_archive_members(
     bucket_name, blob_prefix = _parse_gs_uri(gcs_prefix)
     bucket = client.bucket(bucket_name)
 
+    total_size = _get_total_blob_size(bucket, blob_prefix, parts)
+
     blob_streams: List[io.IOBase] = []
     for part in parts:
         object_name = _join_gcs_object_path(blob_prefix, part)
@@ -161,12 +203,22 @@ def _stream_archive_members(
         blob_streams.append(blob.open('rb'))
 
     members: List[str] = []
-    with _ConcatenatedStream(blob_streams) as stream:
-        # 'r|gz' is the sequential/streaming mode — no seeking required.
-        with tarfile.open(fileobj=stream, mode='r|gz') as tar:
-            for member in tar:
-                if member.isfile():
-                    members.append(_normalize_relative_posix_path(member.name))
+    with _ConcatenatedStream(blob_streams) as raw_stream:
+        progress = tqdm(
+            total=total_size,
+            desc=f'  Streaming {archive_stem}',
+            unit='B',
+            unit_scale=True,
+            unit_divisor=1024,
+            leave=False,
+        )
+        with progress, _ProgressStream(raw_stream, progress) as stream:
+            # 'r|gz' is the sequential/streaming mode — no seeking required.
+            with tarfile.open(fileobj=stream, mode='r|gz') as tar:
+                for member in tar:
+                    if member.isfile():
+                        members.append(_normalize_relative_posix_path(member.name))
+                        progress.set_postfix(files=len(members), refresh=False)
     return members
 
 
@@ -234,6 +286,7 @@ def build_archive_index(
 
             member_paths = _stream_archive_members(
                 gcs_prefix=gcs_prefix,
+                archive_stem=archive_stem,
                 parts=parts,
                 storage_client=storage_client,
             )
