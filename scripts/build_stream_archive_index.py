@@ -1,23 +1,26 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Build a SQLite index for split tar.gz archives stored in GCS."""
+"""Build a SQLite index for split tar.gz archives stored in GCS.
+
+Archives are streamed directly from GCS — no local download or disk space
+is required.  Only tar member headers are inspected; file contents are
+discarded during the streaming read.
+"""
 
 import argparse
+import io
 import json
+import logging
 import os
 import posixpath
 import re
-import shutil
 import sqlite3
+import sys
 import tarfile
-import tempfile
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
-
-import logging
-import sys
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
@@ -66,6 +69,10 @@ def _get_storage_client(storage_client: Optional[Any] = None):
     return storage.Client()
 
 
+# ---------------------------------------------------------------------------
+# GCS blob listing
+# ---------------------------------------------------------------------------
+
 def _list_archive_parts(gcs_prefix: str, storage_client: Optional[Any] = None) -> Dict[str, List[str]]:
     client = _get_storage_client(storage_client)
     bucket_name, blob_prefix = _parse_gs_uri(gcs_prefix)
@@ -93,49 +100,79 @@ def _list_archive_parts(gcs_prefix: str, storage_client: Optional[Any] = None) -
     }
 
 
-def _download_and_merge_archive(
+# ---------------------------------------------------------------------------
+# Streaming tar member enumeration (no local download)
+# ---------------------------------------------------------------------------
+
+class _ConcatenatedStream:
+    """Concatenate multiple file-like objects into one readable stream."""
+
+    def __init__(self, streams: List[io.IOBase]):
+        self._streams = streams
+        self._idx = 0
+
+    def read(self, size: int = -1) -> bytes:
+        chunks: List[bytes] = []
+        remaining = size
+        while self._idx < len(self._streams):
+            chunk = self._streams[self._idx].read(remaining if remaining > 0 else -1)
+            if not chunk:
+                self._streams[self._idx].close()
+                self._idx += 1
+                continue
+            chunks.append(chunk)
+            if remaining > 0:
+                remaining -= len(chunk)
+                if remaining <= 0:
+                    break
+        return b''.join(chunks)
+
+    def close(self) -> None:
+        for stream in self._streams[self._idx:]:
+            stream.close()
+        self._idx = len(self._streams)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+def _stream_archive_members(
     *,
     gcs_prefix: str,
-    archive_stem: str,
     parts: List[str],
-    output_path: str,
-    scratch_dir: str,
     storage_client: Optional[Any] = None,
-) -> str:
+) -> List[str]:
+    """Stream a (possibly split) tar.gz from GCS and return member file paths.
+
+    Only tar headers are inspected — file contents are discarded on the fly,
+    so no local disk space is consumed.
+    """
     client = _get_storage_client(storage_client)
     bucket_name, blob_prefix = _parse_gs_uri(gcs_prefix)
     bucket = client.bucket(bucket_name)
 
-    os.makedirs(scratch_dir, exist_ok=True)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    blob_streams: List[io.IOBase] = []
+    for part in parts:
+        object_name = _join_gcs_object_path(blob_prefix, part)
+        blob = bucket.blob(object_name)
+        blob_streams.append(blob.open('rb'))
 
-    temp_part_paths = []
-    try:
-        for relative_part in tqdm(parts, desc=f'  Downloading {archive_stem}',
-                                  unit=' parts', leave=False):
-            object_name = _join_gcs_object_path(blob_prefix, relative_part)
-            local_part_path = os.path.join(scratch_dir, os.path.basename(relative_part))
-            bucket.blob(object_name).download_to_filename(local_part_path)
-            temp_part_paths.append(local_part_path)
+    members: List[str] = []
+    with _ConcatenatedStream(blob_streams) as stream:
+        # 'r|gz' is the sequential/streaming mode — no seeking required.
+        with tarfile.open(fileobj=stream, mode='r|gz') as tar:
+            for member in tar:
+                if member.isfile():
+                    members.append(_normalize_relative_posix_path(member.name))
+    return members
 
-        tmp_output_path = f'{output_path}.tmp'
-        try:
-            with open(tmp_output_path, 'wb') as out_file:
-                for part_path in temp_part_paths:
-                    with open(part_path, 'rb') as in_file:
-                        shutil.copyfileobj(in_file, out_file, length=4 * 1024 * 1024)
-            os.replace(tmp_output_path, output_path)
-        finally:
-            if os.path.exists(tmp_output_path):
-                os.remove(tmp_output_path)
-    finally:
-        for part_path in temp_part_paths:
-            if os.path.exists(part_path):
-                os.remove(part_path)
 
-    logger.info(f'Prepared archive `{archive_stem}` at {output_path}')
-    return output_path
-
+# ---------------------------------------------------------------------------
+# SQLite schema
+# ---------------------------------------------------------------------------
 
 def _create_schema(conn: sqlite3.Connection) -> None:
     conn.executescript("""
@@ -155,6 +192,10 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     """)
 
 
+# ---------------------------------------------------------------------------
+# Main index builder
+# ---------------------------------------------------------------------------
+
 def build_archive_index(
     *,
     gcs_prefix: str,
@@ -162,6 +203,13 @@ def build_archive_index(
     scratch_dir: Optional[str] = None,
     storage_client: Optional[Any] = None,
 ) -> str:
+    """Build a SQLite index by streaming archives from GCS.
+
+    ``scratch_dir`` is accepted for backward compatibility but ignored —
+    archives are no longer downloaded to local disk.
+    """
+    del scratch_dir  # no longer used
+
     archive_parts = _list_archive_parts(gcs_prefix, storage_client=storage_client)
     if not archive_parts:
         raise ValueError(f'No archive parts found under {gcs_prefix}')
@@ -178,55 +226,33 @@ def build_archive_index(
     with sqlite3.connect(temp_output) as conn:
         _create_schema(conn)
 
-        managed_temp_dir = None
-        if scratch_dir is None:
-            managed_temp_dir = tempfile.TemporaryDirectory(prefix='stream_archive_index_')
-            scratch_dir = managed_temp_dir.name
-        else:
-            scratch_dir = os.path.abspath(os.path.expanduser(scratch_dir))
-            os.makedirs(scratch_dir, exist_ok=True)
+        sorted_stems = sorted(archive_parts)
+        for archive_stem in tqdm(sorted_stems, desc='Processing archives',
+                                 unit=' archives'):
+            parts = archive_parts[archive_stem]
+            archive_id = archive_stem
 
-        try:
-            sorted_stems = sorted(archive_parts)
-            for archive_stem in tqdm(sorted_stems, desc='Processing archives',
-                                     unit=' archives'):
-                parts = archive_parts[archive_stem]
-                archive_id = archive_stem
-                archive_path = os.path.join(scratch_dir, archive_stem.replace('/', os.sep))
-                _download_and_merge_archive(
-                    gcs_prefix=gcs_prefix,
-                    archive_stem=archive_stem,
-                    parts=parts,
-                    output_path=archive_path,
-                    scratch_dir=os.path.join(scratch_dir, 'parts', archive_stem.replace('/', '_')),
-                    storage_client=storage_client,
-                )
+            member_paths = _stream_archive_members(
+                gcs_prefix=gcs_prefix,
+                parts=parts,
+                storage_client=storage_client,
+            )
 
-                conn.execute(
-                    'INSERT INTO archives (archive_id, gcs_prefix, archive_stem, parts_json) VALUES (?, ?, ?, ?)',
-                    (archive_id, gcs_prefix, archive_stem, json.dumps(parts, ensure_ascii=False)))
+            conn.execute(
+                'INSERT INTO archives (archive_id, gcs_prefix, archive_stem, parts_json) VALUES (?, ?, ?, ?)',
+                (archive_id, gcs_prefix, archive_stem, json.dumps(parts, ensure_ascii=False)))
 
-                rows = []
-                with tarfile.open(archive_path, 'r:gz') as tar:
-                    for member in tar.getmembers():
-                        if not member.isfile():
-                            continue
-                        member_path = _normalize_relative_posix_path(member.name)
-                        rows.append((member_path, archive_id, member_path))
+            rows = [(mp, archive_id, mp) for mp in member_paths]
+            try:
+                conn.executemany(
+                    'INSERT INTO files (logical_path, archive_id, member_path) VALUES (?, ?, ?)',
+                    rows)
+            except sqlite3.IntegrityError as e:
+                raise ValueError(
+                    f'Duplicate logical_path detected while indexing `{archive_stem}`: {e}') from e
 
-                try:
-                    conn.executemany(
-                        'INSERT INTO files (logical_path, archive_id, member_path) VALUES (?, ?, ?)',
-                        rows)
-                except sqlite3.IntegrityError as e:
-                    raise ValueError(
-                        f'Duplicate logical_path detected while indexing `{archive_stem}`: {e}') from e
-
-                conn.commit()
-                logger.info(f'Indexed {len(rows)} files from `{archive_stem}`')
-        finally:
-            if managed_temp_dir is not None:
-                managed_temp_dir.cleanup()
+            conn.commit()
+            logger.info(f'Indexed {len(rows)} files from `{archive_stem}`')
 
     os.replace(temp_output, output_path)
     logger.info(f'Saved archive index to {output_path}')
@@ -237,7 +263,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Build a SQLite index for split tar.gz archives in GCS')
     parser.add_argument('--gcs-prefix', required=True, help='GCS prefix that contains archive shard parts')
     parser.add_argument('--output', required=True, help='Output SQLite path')
-    parser.add_argument('--scratch-dir', help='Optional local scratch directory for temporary archives')
+    parser.add_argument('--scratch-dir', help='(ignored) Kept for backward compatibility')
     return parser.parse_args()
 
 

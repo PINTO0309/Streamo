@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import logging
 import os
 import sqlite3
@@ -89,6 +90,13 @@ class FakeBlob:
     def __init__(self, client, name: str):
         self._client = client
         self.name = name
+
+    def open(self, mode: str = 'rb'):
+        assert mode == 'rb'
+        with self._client._lock:
+            self._client.download_counts[self.name] += 1
+            data = self._client.objects[self.name]
+        return io.BytesIO(data)
 
     def download_to_filename(self, filename: str):
         with self._client._lock:
