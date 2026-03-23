@@ -165,6 +165,19 @@ hf download maifoundations/Streamo-Instruct-465K \
 --repo-type dataset \
 --local-dir dataset/Streamo-Instruct-465K
 
+########## アーカイブモード用
+# 1. まずアーカイブインデックスを構築
+python scripts/build_stream_archive_index.py \
+--gcs-prefix gs://your-bucket/datasets \
+--output ./dataset/stream/archive_index.sqlite
+
+# 2. アーカイブモードでデータセットを準備
+python scripts/prepare_streamo_training_data.py \
+--label-root dataset/Streamo-Instruct-465K \
+--archive-index ./dataset/stream/archive_index.sqlite \
+--output-stream ./dataset/stream/stream_format.json
+
+########## ローカルモード用
 python scripts/prepare_streamo_training_data.py \
 --label-root /media/lm/NO_NAME/Streamo-Instruct-465K \
 --media-root /media/lm/NO_NAME \

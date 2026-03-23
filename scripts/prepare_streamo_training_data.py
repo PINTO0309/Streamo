@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 Prepare a training-ready stream-format dataset from local Streamo-Instruct labels
-and partially downloaded video folders.
+and partially downloaded video folders, or from GCS archive indices.
 
 Workflow:
 1. Scan label JSON files under the label root.
-2. Resolve each sample's local video path from the media root.
+2. Resolve each sample's video path from:
+   a. Local media root (default), or
+   b. A SQLite archive index built by build_stream_archive_index.py (--archive-index).
 3. Drop unresolved or missing-video samples with a JSON report.
 4. Merge the remaining samples into one raw JSON file.
 5. Convert the merged raw JSON to stream format.
@@ -15,6 +17,8 @@ Workflow:
 import argparse
 import json
 import os
+import posixpath
+import sqlite3
 import sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -45,6 +49,24 @@ KNOWN_SOURCES = {
     'tacos',
 }
 
+# Mapping from source name to archive_id(s) in the SQLite index.
+# archive_id corresponds to the archive_stem produced by build_stream_archive_index.py.
+SOURCE_ARCHIVE_MAP: Dict[str, List[str]] = {
+    'ActivityNet': ['activitynet/videos.tar.gz'],
+    'coin': ['coin/coin/videos.tar.gz'],
+    'QVHighlight': ['qvhighlights/videos.tar.gz'],
+    'queryd': ['queryd/videos.tar.gz'],
+    'didemo': ['didemo/videos.tar.gz'],
+    'tacos': ['tacos/videos.tar.gz'],
+    'Youcook': ['youcook2/videos.tar.gz'],
+    'Youcookv2': ['youcook2/videos.tar.gz'],
+    'how_to_caption': ['how_to_caption/how_to_caption.tar.gz'],
+    'how_to_step': ['how_to_step/how_to_step.tar.gz'],
+    'ego_timeqa': ['ego4d/v2/videos_3fps_480_noaudio.tar.gz'],
+}
+
+ArchiveLookup = Tuple[Dict[Tuple[str, str], List[str]], Dict[str, List[str]]]
+
 
 def str2bool(value: str) -> bool:
     value = value.strip().lower()
@@ -63,6 +85,89 @@ def normalize_filter(values: Optional[Sequence[str]]) -> Optional[set]:
 
 def ensure_parent_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def build_archive_lookup(archive_index_path: Path) -> ArchiveLookup:
+    """Build lookup dicts from the SQLite archive index.
+
+    Returns a tuple of:
+      - ``(archive_id, basename) -> [logical_path, ...]``
+      - ``basename -> [logical_path, ...]``
+    """
+    by_archive_basename: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+    by_basename: Dict[str, List[str]] = defaultdict(list)
+    with sqlite3.connect(str(archive_index_path)) as conn:
+        for logical_path, archive_id in conn.execute('SELECT logical_path, archive_id FROM files'):
+            basename = posixpath.basename(logical_path)
+            if basename:
+                by_archive_basename[(archive_id, basename)].append(logical_path)
+                by_basename[basename].append(logical_path)
+    return dict(by_archive_basename), dict(by_basename)
+
+
+def resolve_archive_video_path(
+    row: Dict[str, Any],
+    archive_lookup: ArchiveLookup,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve a video path against the SQLite archive index.
+
+    Returns ``(logical_path, None)`` on success or ``(None, reason)`` on failure.
+    """
+    source = str(row.get('source') or '')
+    video_path = str(row.get('video_path') or '')
+    if not video_path:
+        return None, 'missing_video_path'
+
+    by_archive_basename, by_basename = archive_lookup
+    archive_ids = SOURCE_ARCHIVE_MAP.get(source)
+
+    if source == 'Koala':
+        return None, 'unsupported_source'
+    if source not in KNOWN_SOURCES:
+        return None, 'unsupported_source'
+
+    basename = Path(video_path).name
+
+    # Source-specific basename transformations (mirrors _source_candidates logic)
+    if source == 'ego_timeqa':
+        uuid_prefix = basename.split('_', 1)[0]
+        basename = f'{uuid_prefix}.mp4'
+    elif source in {'Youcook', 'Youcookv2'}:
+        if not basename.endswith('.mp4'):
+            basename = f'{basename}.mp4'
+
+    # Try source-specific archives first
+    if archive_ids:
+        matches: List[str] = []
+        for aid in archive_ids:
+            matches.extend(by_archive_basename.get((aid, basename), []))
+        if len(matches) == 1:
+            return matches[0], None
+        if len(matches) > 1:
+            return None, 'ambiguous_match'
+
+    # Fallback: search across all archives
+    all_matches = by_basename.get(basename, [])
+    if len(all_matches) == 1:
+        return all_matches[0], None
+    if len(all_matches) > 1:
+        return None, 'ambiguous_match'
+
+    # For tacos, also try .avi extension
+    if source == 'tacos':
+        stem = Path(video_path).stem
+        avi_basename = f'{stem}.avi'
+        if archive_ids:
+            matches = []
+            for aid in archive_ids:
+                matches.extend(by_archive_basename.get((aid, avi_basename), []))
+            if len(matches) == 1:
+                return matches[0], None
+        avi_all = by_basename.get(avi_basename, [])
+        if len(avi_all) == 1:
+            return avi_all[0], None
+
+    return None, 'missing_file'
 
 
 def iter_label_files(label_root: Path) -> List[Path]:
@@ -246,12 +351,25 @@ def prepare_streamo_training_data(args: argparse.Namespace) -> Dict[str, Any]:
     output_stream = Path(args.output_stream).expanduser()
     report_json = Path(args.report_json).expanduser()
 
+    archive_index_path = (
+        Path(args.archive_index).expanduser().resolve()
+        if args.archive_index else None
+    )
+    use_archive = archive_index_path is not None
+
     include_tasks = normalize_filter(args.include_tasks)
     include_sources = normalize_filter(args.include_sources)
     exclude_sources = normalize_filter(args.exclude_sources)
 
     label_files = iter_label_files(label_root)
-    basename_index = build_basename_index(media_root)
+
+    # Build the appropriate lookup depending on mode
+    archive_lookup: Optional[ArchiveLookup] = None
+    basename_index: Optional[Dict[str, List[str]]] = None
+    if use_archive:
+        archive_lookup = build_archive_lookup(archive_index_path)
+    else:
+        basename_index = build_basename_index(media_root)
 
     source_stats: Dict[str, Dict[str, Any]] = defaultdict(_empty_source_stats)
     drop_reasons: Dict[str, int] = {}
@@ -286,7 +404,10 @@ def prepare_streamo_training_data(args: argparse.Namespace) -> Dict[str, Any]:
                 filtered_rows += 1
                 continue
 
-            resolved_path, reason = resolve_local_video_path(row, media_root, basename_index)
+            if use_archive:
+                resolved_path, reason = resolve_archive_video_path(row, archive_lookup)
+            else:
+                resolved_path, reason = resolve_local_video_path(row, media_root, basename_index)
             if resolved_path is None:
                 source_stat['dropped'] += 1
                 _incr(source_stat['drop_reasons'], reason)
@@ -324,6 +445,7 @@ def prepare_streamo_training_data(args: argparse.Namespace) -> Dict[str, Any]:
     report = {
         'label_root': str(label_root),
         'media_root': str(media_root),
+        'archive_index': str(archive_index_path) if archive_index_path else None,
         'output_raw': str(output_raw),
         'output_stream': str(output_stream),
         'report_json': str(report_json),
@@ -361,6 +483,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Prepare local Streamo training data with partial video coverage.')
     parser.add_argument('--label-root', default='/media/lm/NO_NAME/Streamo-Instruct-465K')
     parser.add_argument('--media-root', default='/media/lm/NO_NAME')
+    parser.add_argument(
+        '--archive-index',
+        default=None,
+        help='Path to SQLite archive index built by build_stream_archive_index.py. '
+             'When provided, resolves video paths against GCS archives instead of local files. '
+             'Output video_path values will be logical relative paths for ArchiveVideoResolver.')
     parser.add_argument('--output-raw', default='./dataset/stream/raw_resolved.json')
     parser.add_argument('--output-stream', default='./dataset/stream/stream_format.json')
     parser.add_argument('--report-json', default='./dataset/stream/prepare_report.json')

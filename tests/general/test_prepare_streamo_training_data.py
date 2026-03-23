@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -263,6 +264,195 @@ class TestPrepareStreamoTrainingData(unittest.TestCase):
                 os.chdir(old_cwd)
                 os.environ.clear()
                 os.environ.update(old_env)
+
+
+def _create_archive_index(db_path, entries):
+    """Create a minimal SQLite archive index for testing.
+
+    ``entries`` is a list of (logical_path, archive_id, member_path) tuples.
+    """
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.executescript("""
+            CREATE TABLE archives (
+                archive_id TEXT PRIMARY KEY,
+                gcs_prefix TEXT NOT NULL,
+                archive_stem TEXT NOT NULL,
+                parts_json TEXT NOT NULL
+            );
+            CREATE TABLE files (
+                logical_path TEXT PRIMARY KEY,
+                archive_id TEXT NOT NULL,
+                member_path TEXT NOT NULL,
+                FOREIGN KEY (archive_id) REFERENCES archives(archive_id)
+            );
+            CREATE INDEX idx_files_archive_id ON files(archive_id);
+        """)
+        archive_ids = {e[1] for e in entries}
+        for aid in archive_ids:
+            conn.execute(
+                'INSERT INTO archives (archive_id, gcs_prefix, archive_stem, parts_json) VALUES (?, ?, ?, ?)',
+                (aid, 'gs://test-bucket/datasets', aid, '[]'))
+        conn.executemany(
+            'INSERT INTO files (logical_path, archive_id, member_path) VALUES (?, ?, ?)',
+            entries)
+        conn.commit()
+
+
+class TestArchiveVideoResolution(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_prepare_module()
+
+    def test_resolve_archive_video_path_coin(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / 'index.sqlite'
+            _create_archive_index(db_path, [
+                ('videos/example.mp4', 'coin/coin/videos.tar.gz', 'videos/example.mp4'),
+            ])
+            lookup = self.module.build_archive_lookup(db_path)
+            resolved, reason = self.module.resolve_archive_video_path(
+                {'source': 'coin', 'video_path': 'coin/example.mp4'}, lookup)
+            self.assertIsNone(reason)
+            self.assertEqual(resolved, 'videos/example.mp4')
+
+    def test_resolve_archive_video_path_activitynet(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / 'index.sqlite'
+            _create_archive_index(db_path, [
+                ('videos/v_clip.mp4', 'activitynet/videos.tar.gz', 'videos/v_clip.mp4'),
+            ])
+            lookup = self.module.build_archive_lookup(db_path)
+            resolved, reason = self.module.resolve_archive_video_path(
+                {'source': 'ActivityNet', 'video_path': 'ActivityNet/v_clip.mp4'}, lookup)
+            self.assertIsNone(reason)
+            self.assertEqual(resolved, 'videos/v_clip.mp4')
+
+    def test_resolve_archive_video_path_ego_timeqa(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / 'index.sqlite'
+            _create_archive_index(db_path, [
+                ('uuid123.mp4', 'ego4d/v2/videos_3fps_480_noaudio.tar.gz', 'uuid123.mp4'),
+            ])
+            lookup = self.module.build_archive_lookup(db_path)
+            resolved, reason = self.module.resolve_archive_video_path(
+                {'source': 'ego_timeqa', 'video_path': 'ego_timeqa/uuid123_18_168.mp4'}, lookup)
+            self.assertIsNone(reason)
+            self.assertEqual(resolved, 'uuid123.mp4')
+
+    def test_resolve_archive_video_path_youcook_adds_mp4(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / 'index.sqlite'
+            _create_archive_index(db_path, [
+                ('videos/ycook.mp4', 'youcook2/videos.tar.gz', 'videos/ycook.mp4'),
+            ])
+            lookup = self.module.build_archive_lookup(db_path)
+            resolved, reason = self.module.resolve_archive_video_path(
+                {'source': 'Youcookv2', 'video_path': 'YouCookv2/raw_videos/training/101/ycook'},
+                lookup)
+            self.assertIsNone(reason)
+            self.assertEqual(resolved, 'videos/ycook.mp4')
+
+    def test_resolve_archive_video_path_missing(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / 'index.sqlite'
+            _create_archive_index(db_path, [])
+            lookup = self.module.build_archive_lookup(db_path)
+            resolved, reason = self.module.resolve_archive_video_path(
+                {'source': 'coin', 'video_path': 'coin/missing.mp4'}, lookup)
+            self.assertIsNone(resolved)
+            self.assertEqual(reason, 'missing_file')
+
+    def test_resolve_archive_video_path_koala_unsupported(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / 'index.sqlite'
+            _create_archive_index(db_path, [])
+            lookup = self.module.build_archive_lookup(db_path)
+            resolved, reason = self.module.resolve_archive_video_path(
+                {'source': 'Koala', 'video_path': 'Koala/clip.mp4'}, lookup)
+            self.assertIsNone(resolved)
+            self.assertEqual(reason, 'unsupported_source')
+
+    def test_resolve_archive_video_path_ambiguous(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / 'index.sqlite'
+            _create_archive_index(db_path, [
+                ('dir_a/clip.mp4', 'coin/coin/videos.tar.gz', 'dir_a/clip.mp4'),
+                ('dir_b/clip.mp4', 'coin/coin/videos.tar.gz', 'dir_b/clip.mp4'),
+            ])
+            lookup = self.module.build_archive_lookup(db_path)
+            resolved, reason = self.module.resolve_archive_video_path(
+                {'source': 'coin', 'video_path': 'coin/clip.mp4'}, lookup)
+            self.assertIsNone(resolved)
+            self.assertEqual(reason, 'ambiguous_match')
+
+    def test_prepare_with_archive_index_integration(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            label_root = tmp_path / 'labels'
+            media_root = tmp_path / 'media'
+            output_raw = tmp_path / 'dataset' / 'stream' / 'raw_resolved.json'
+            output_stream = tmp_path / 'dataset' / 'stream' / 'stream_format.json'
+            report_json = tmp_path / 'dataset' / 'stream' / 'prepare_report.json'
+            db_path = tmp_path / 'archive_index.sqlite'
+
+            _create_archive_index(db_path, [
+                ('videos/coin_clip.mp4', 'coin/coin/videos.tar.gz', 'videos/coin_clip.mp4'),
+                ('videos/qv_clip.mp4', 'qvhighlights/videos.tar.gz', 'videos/qv_clip.mp4'),
+            ])
+
+            rows = [
+                {
+                    'video_name': 'coin_clip.mp4',
+                    'video_path': 'coin/coin_clip.mp4',
+                    'task_type': 'QA',
+                    'source': 'coin',
+                    'question': [{'content': 'What happens?', 'time': '0'}],
+                    'response': [{'content': 'A coin task.', 'st_time': 0, 'end_time': 1, 'time': ''}],
+                },
+                {
+                    'video_name': 'qv_clip.mp4',
+                    'video_path': 'QVHighlight/qv_clip.mp4',
+                    'task_type': 'QA',
+                    'source': 'QVHighlight',
+                    'question': [{'content': 'What?', 'time': '0'}],
+                    'response': [{'content': 'QV task.', 'st_time': 0, 'end_time': 1, 'time': ''}],
+                },
+                {
+                    'video_name': 'missing.mp4',
+                    'video_path': 'queryd/missing.mp4',
+                    'task_type': 'QA',
+                    'source': 'queryd',
+                    'question': [{'content': 'Missing?', 'time': '0'}],
+                    'response': [{'content': 'Missing.', 'st_time': 0, 'end_time': 1, 'time': ''}],
+                },
+            ]
+            label_file = label_root / 'qa' / 'labels.json'
+            label_file.parent.mkdir(parents=True, exist_ok=True)
+            label_file.write_text(json.dumps(rows, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+            args = self.module.parse_args([
+                '--label-root', str(label_root),
+                '--media-root', str(media_root),
+                '--archive-index', str(db_path),
+                '--output-raw', str(output_raw),
+                '--output-stream', str(output_stream),
+                '--report-json', str(report_json),
+                '--num-workers', '2',
+                '--fail-on-empty', 'false',
+            ])
+            report = self.module.prepare_streamo_training_data(args)
+
+            self.assertTrue(output_raw.exists())
+            self.assertTrue(report_json.exists())
+
+            raw_rows = json.loads(output_raw.read_text(encoding='utf-8'))
+            self.assertEqual(len(raw_rows), 2)
+            self.assertEqual(raw_rows[0]['video_path'], 'videos/coin_clip.mp4')
+            self.assertEqual(raw_rows[1]['video_path'], 'videos/qv_clip.mp4')
+            self.assertEqual(report['resolved_raw_rows'], 2)
+            self.assertEqual(report['drop_reasons'].get('missing_file', 0), 1)
+            self.assertIsNotNone(report.get('archive_index'))
 
 
 if __name__ == '__main__':
