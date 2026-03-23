@@ -159,13 +159,13 @@ raw / converted の例は `dataset/example/` を参照してください。
 
 ```bash
 python scripts/prepare_streamo_training_data.py \
-    --label-root /media/lm/NO_NAME/Streamo-Instruct-465K \
-    --media-root /media/lm/NO_NAME \
-    --output-raw ./dataset/stream/raw_resolved.json \
-    --output-stream ./dataset/stream/stream_format.json \
-    --report-json ./dataset/stream/prepare_report.json \
-    --fps 1.0 \
-    --num-workers 8
+--label-root /media/lm/NO_NAME/Streamo-Instruct-465K \
+--media-root /media/lm/NO_NAME \
+--output-raw ./dataset/stream/raw_resolved.json \
+--output-stream ./dataset/stream/stream_format.json \
+--report-json ./dataset/stream/prepare_report.json \
+--fps 1.0 \
+--num-workers 8
 ```
 
 このステップでは次を行います。
