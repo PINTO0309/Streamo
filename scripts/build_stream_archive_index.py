@@ -14,6 +14,8 @@ import tempfile
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
+from tqdm import tqdm
+
 import logging
 import sys
 
@@ -69,7 +71,8 @@ def _list_archive_parts(gcs_prefix: str, storage_client: Optional[Any] = None) -
     bucket_name, blob_prefix = _parse_gs_uri(gcs_prefix)
 
     groups: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
-    for blob in client.list_blobs(bucket_name, prefix=blob_prefix):
+    for blob in tqdm(client.list_blobs(bucket_name, prefix=blob_prefix),
+                     desc='Listing GCS blobs', unit=' blobs'):
         relative_name = blob.name
         if blob_prefix:
             relative_name = relative_name[len(blob_prefix):].lstrip('/')
@@ -108,7 +111,8 @@ def _download_and_merge_archive(
 
     temp_part_paths = []
     try:
-        for relative_part in parts:
+        for relative_part in tqdm(parts, desc=f'  Downloading {archive_stem}',
+                                  unit=' parts', leave=False):
             object_name = _join_gcs_object_path(blob_prefix, relative_part)
             local_part_path = os.path.join(scratch_dir, os.path.basename(relative_part))
             bucket.blob(object_name).download_to_filename(local_part_path)
@@ -183,7 +187,9 @@ def build_archive_index(
             os.makedirs(scratch_dir, exist_ok=True)
 
         try:
-            for archive_stem in sorted(archive_parts):
+            sorted_stems = sorted(archive_parts)
+            for archive_stem in tqdm(sorted_stems, desc='Processing archives',
+                                     unit=' archives'):
                 parts = archive_parts[archive_stem]
                 archive_id = archive_stem
                 archive_path = os.path.join(scratch_dir, archive_stem.replace('/', os.sep))
