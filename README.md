@@ -39,6 +39,7 @@ This is the official implementation of the paper 'Streaming Video Instruction Tu
 
 ```bash
 pip install -r requirements.txt
+pip install google-cloud-storage
 ```
 
 ## Data Preparation📊
