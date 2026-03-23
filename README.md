@@ -162,6 +162,9 @@ It scans all label JSON files, rewrites each surviving row to an absolute local 
 #### 2. Build the training dataset from the local disk layout
 
 ```bash
+source /mnt/data/venv/bin/activate
+hf auth login
+
 hf download maifoundations/Streamo-Instruct-465K \
 --repo-type dataset \
 --local-dir dataset/Streamo-Instruct-465K
