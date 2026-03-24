@@ -184,8 +184,8 @@ python scripts/prepare_streamo_training_data.py \
 
 ########## ローカルモード用
 python scripts/prepare_streamo_training_data.py \
---label-root /media/lm/NO_NAME/Streamo-Instruct-465K \
---media-root /media/lm/NO_NAME \
+--label-root /mnt/data/downloads/Streamo-Instruct-465K \
+--media-root /mnt/data/downloads/datasets \
 --output-raw ./dataset/stream/raw_resolved.json \
 --output-stream ./dataset/stream/stream_format.json \
 --report-json ./dataset/stream/prepare_report.json \
