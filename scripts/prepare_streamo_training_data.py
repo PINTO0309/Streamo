@@ -306,11 +306,11 @@ def convert_rows_to_stream(
     *,
     fps: float,
     num_workers: int,
-) -> Tuple[List[Dict[str, Any]], List[int]]:
+) -> Tuple[int, List[int]]:
     if not rows:
         ensure_parent_dir(output_path)
         output_path.write_text('[]\n', encoding='utf-8')
-        return [], []
+        return 0, []
 
     results_by_index: Dict[int, Dict[str, Any]] = {}
     failed_indices: List[int] = []
@@ -328,10 +328,18 @@ def convert_rows_to_stream(
                 results_by_index[idx] = result
             pbar.set_postfix(ok=len(results_by_index), fail=len(failed_indices), refresh=False)
 
-    converted_rows = [results_by_index[idx] for idx in sorted(results_by_index)]
+    sorted_indices = sorted(results_by_index)
+    num_converted = len(sorted_indices)
     ensure_parent_dir(output_path)
-    output_path.write_text(json.dumps(converted_rows, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    return converted_rows, sorted(failed_indices)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write('[\n')
+        for i, idx in enumerate(sorted_indices):
+            line = json.dumps(results_by_index[idx], ensure_ascii=False)
+            f.write(f'  {line}')
+            f.write(',\n' if i < len(sorted_indices) - 1 else '\n')
+        f.write(']\n')
+    results_by_index.clear()  # free memory
+    return num_converted, sorted(failed_indices)
 
 
 def _empty_source_stats() -> Dict[str, Any]:
@@ -428,9 +436,15 @@ def prepare_streamo_training_data(args: argparse.Namespace) -> Dict[str, Any]:
             source_stat['resolved_raw'] += 1
 
     ensure_parent_dir(output_raw)
-    output_raw.write_text(json.dumps(resolved_rows, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    with open(output_raw, 'w', encoding='utf-8') as f:
+        f.write('[\n')
+        for i, row in enumerate(resolved_rows):
+            line = json.dumps(row, ensure_ascii=False)
+            f.write(f'  {line}')
+            f.write(',\n' if i < len(resolved_rows) - 1 else '\n')
+        f.write(']\n')
 
-    converted_rows, failed_indices = convert_rows_to_stream(
+    num_converted, failed_indices = convert_rows_to_stream(
         resolved_rows,
         output_stream,
         fps=args.fps,
@@ -462,8 +476,8 @@ def prepare_streamo_training_data(args: argparse.Namespace) -> Dict[str, Any]:
         'total_rows': total_rows,
         'filtered_rows': filtered_rows,
         'resolved_raw_rows': len(resolved_rows),
-        'stream_rows': len(converted_rows),
-        'dropped_rows': total_rows - filtered_rows - len(converted_rows),
+        'stream_rows': num_converted,
+        'dropped_rows': total_rows - filtered_rows - num_converted,
         'drop_reasons': dict(sorted(drop_reasons.items())),
         'sources': {
             source: {
