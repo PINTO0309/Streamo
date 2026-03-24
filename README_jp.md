@@ -178,7 +178,9 @@ python scripts/build_stream_archive_index.py \
 python scripts/prepare_streamo_training_data.py \
 --label-root dataset/Streamo-Instruct-465K \
 --archive-index ./dataset/stream/archive_index.sqlite \
---output-stream ./dataset/stream/stream_format.json
+--output-stream ./dataset/stream/stream_format.json \
+--fps 1.0 \
+--num-workers 8
 
 ########## ローカルモード用
 python scripts/prepare_streamo_training_data.py \
