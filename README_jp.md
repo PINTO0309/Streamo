@@ -193,6 +193,21 @@ python scripts/prepare_streamo_training_data.py \
 --num-workers 8
 ```
 
+| ソース            | ラベルあり | 動画あり |
+|------------------|------------|----------|
+| ActivityNet      | Yes        | Yes      |
+| coin             | Yes        | Yes      |
+| QVHighlight      | Yes        | Yes      |
+| queryd           | Yes        | Yes      |
+| didemo           | Yes        | Yes      |
+| tacos            | Yes        | Yes      |
+| Youcookv2        | Yes        | Yes      |
+| ego_timeqa       | Yes        | Yes      |
+| how_to_caption   | Yes        | Yes      |
+| how_to_step      | Yes        | Yes      |
+| LLaVA_Video      | Yes        | No       |
+| Koala            | Yes        | No（スクリプトで unsupported_source 扱い） |
+
 このステップでは次を行います。
 
 1. ラベルルート配下の JSON をすべて走査する
