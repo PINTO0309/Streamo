@@ -178,14 +178,14 @@ def iter_index_roots(media_root: Path) -> List[Path]:
     candidates = [
         media_root / 'coin' / 'videos',
         media_root / 'activitynet' / 'videos',
-        media_root / 'QVHighlight' / 'videos',
-        media_root / 'Queryd' / 'videos',
+        media_root / 'qvhighlights' / 'videos',
+        media_root / 'queryd' / 'videos',
         media_root / 'didemo' / 'videos',
         media_root / 'tacos' / 'videos',
         media_root / 'youcook2' / 'videos',
         media_root / 'ego4d' / 'videos_3fps_480_noaudio',
         media_root / 'how_to_caption' / 'how_to_caption',
-        media_root / 'how_to_step',
+        media_root / 'how_to_step' / 'how_to_step',
         media_root / 'LLaVA_Video',
     ]
     unique_paths = []
@@ -237,9 +237,9 @@ def _source_candidates(source: str, video_path: str, media_root: Path) -> Tuple[
     if source == 'ActivityNet':
         return [media_root / 'activitynet' / 'videos' / basename], None, None
     if source == 'QVHighlight':
-        return [media_root / 'QVHighlight' / 'videos' / basename], None, None
+        return [media_root / 'qvhighlights' / 'videos' / basename], None, None
     if source == 'queryd':
-        return [media_root / 'Queryd' / 'videos' / basename], None, None
+        return [media_root / 'queryd' / 'videos' / basename], None, None
     if source == 'didemo':
         return [media_root / 'didemo' / 'videos' / basename], None, None
     if source == 'tacos':
@@ -253,7 +253,7 @@ def _source_candidates(source: str, video_path: str, media_root: Path) -> Tuple[
     if source == 'how_to_caption':
         return [media_root / 'how_to_caption' / 'how_to_caption' / basename], None, None
     if source == 'how_to_step':
-        return [media_root / video_path], None, None
+        return [media_root / 'how_to_step' / 'how_to_step' / basename], None, None
     if source == 'ego_timeqa':
         uuid_prefix = basename.split('_', 1)[0]
         return [media_root / 'ego4d' / 'videos_3fps_480_noaudio' / f'{uuid_prefix}.mp4'], None, None
