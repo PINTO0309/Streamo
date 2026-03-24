@@ -104,6 +104,61 @@ def _list_archive_parts(gcs_prefix: str, storage_client: Optional[Any] = None) -
 
 
 # ---------------------------------------------------------------------------
+# Local directory scanning
+# ---------------------------------------------------------------------------
+
+def _list_local_archive_parts(
+    local_root: str,
+    strip_top_level: bool = True,
+) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+    """Scan *local_root* for tar.gz files / split parts.
+
+    Returns ``(archive_parts, local_paths_map)`` where:
+    - *archive_parts*: ``{archive_stem: [relative_part_path, ...]}`` with
+      stems compatible with the GCS-derived ``SOURCE_ARCHIVE_MAP``.
+    - *local_paths_map*: ``{relative_part_path: absolute_local_path}``
+
+    When *strip_top_level* is True (default) the first directory component
+    under *local_root* is stripped to produce the archive stem, so that
+    ``/mnt/data/downloads/activitynet/activitynet/videos.tar.gz.00``
+    yields stem ``activitynet/videos.tar.gz`` instead of
+    ``activitynet/activitynet/videos.tar.gz``.
+    """
+    local_root = os.path.abspath(local_root)
+    groups: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
+    local_paths_map: Dict[str, str] = {}
+
+    for dirpath, _dirnames, filenames in os.walk(local_root):
+        for fname in filenames:
+            abs_path = os.path.join(dirpath, fname)
+            rel = os.path.relpath(abs_path, local_root).replace('\\', '/')
+
+            if strip_top_level:
+                # Drop the first path component (e.g. "Ego_timeqa/")
+                parts_split = rel.split('/', 1)
+                if len(parts_split) < 2:
+                    continue
+                rel = parts_split[1]
+
+            match = PART_SUFFIX_RE.match(rel)
+            if match:
+                stem = _normalize_relative_posix_path(match.group('stem'))
+                norm_rel = _normalize_relative_posix_path(rel)
+                groups[stem].append((int(match.group('part')), norm_rel))
+                local_paths_map[norm_rel] = abs_path
+            elif rel.endswith('.tar.gz'):
+                norm_rel = _normalize_relative_posix_path(rel)
+                groups[norm_rel].append((0, norm_rel))
+                local_paths_map[norm_rel] = abs_path
+
+    archive_parts = {
+        stem: [path for _, path in sorted(parts, key=lambda item: item[0])]
+        for stem, parts in groups.items()
+    }
+    return archive_parts, local_paths_map
+
+
+# ---------------------------------------------------------------------------
 # Streaming tar member enumeration (no local download)
 # ---------------------------------------------------------------------------
 
@@ -374,28 +429,52 @@ def _create_schema(conn: sqlite3.Connection) -> None:
 
 def build_archive_index(
     *,
-    gcs_prefix: str,
+    gcs_prefix: Optional[str] = None,
+    local_root: Optional[str] = None,
     output_path: str,
     cache_dir: Optional[str] = None,
     storage_client: Optional[Any] = None,
     num_workers: int = 1,
 ) -> str:
-    """Build a SQLite index for archives in GCS.
+    """Build a SQLite index for archives in GCS or from a local directory.
 
-    When *cache_dir* is given, archive parts are downloaded once and reused
-    on subsequent runs.  Without it, archives are streamed directly from GCS
-    each time.
+    Exactly one of *gcs_prefix* or *local_root* must be provided.
+
+    *local_root* mode scans a local directory for tar.gz parts and builds the
+    index without any GCS interaction.  The first directory component under
+    *local_root* is stripped so that archive stems are compatible with
+    ``SOURCE_ARCHIVE_MAP`` in ``prepare_streamo_training_data.py``.
+
+    *cache_dir* (GCS mode only) caches downloaded parts on disk so they are
+    never downloaded twice.
 
     ``num_workers`` controls how many archives are processed in parallel.
     """
-    if cache_dir is not None:
-        cache_dir = os.path.abspath(os.path.expanduser(cache_dir))
-        os.makedirs(cache_dir, exist_ok=True)
-        logger.info(f'Using local cache: {cache_dir}')
+    if not gcs_prefix and not local_root:
+        raise ValueError('Either --gcs-prefix or --local-root must be provided')
+    if gcs_prefix and local_root:
+        raise ValueError('--gcs-prefix and --local-root are mutually exclusive')
 
-    archive_parts = _list_archive_parts(gcs_prefix, storage_client=storage_client)
-    if not archive_parts:
-        raise ValueError(f'No archive parts found under {gcs_prefix}')
+    # -- local_paths_map is only used in local-root mode --------------------
+    local_paths_map: Dict[str, str] = {}
+
+    if local_root is not None:
+        local_root = os.path.abspath(os.path.expanduser(local_root))
+        logger.info(f'Scanning local archives: {local_root}')
+        archive_parts, local_paths_map = _list_local_archive_parts(local_root)
+        if not archive_parts:
+            raise ValueError(f'No archive parts found under {local_root}')
+        for stem, parts in sorted(archive_parts.items()):
+            logger.info(f'  {stem}  ({len(parts)} part(s))')
+    else:
+        assert gcs_prefix is not None
+        if cache_dir is not None:
+            cache_dir = os.path.abspath(os.path.expanduser(cache_dir))
+            os.makedirs(cache_dir, exist_ok=True)
+            logger.info(f'Using local cache: {cache_dir}')
+        archive_parts = _list_archive_parts(gcs_prefix, storage_client=storage_client)
+        if not archive_parts:
+            raise ValueError(f'No archive parts found under {gcs_prefix}')
 
     output_path = os.path.abspath(os.path.expanduser(output_path))
     output_dir = os.path.dirname(output_path)
@@ -437,8 +516,17 @@ def build_archive_index(
         parts = archive_parts[archive_stem]
         pos = _acquire_position()
         try:
-            if cache_dir is not None:
-                local_paths = _download_archive_parts(
+            if local_paths_map:
+                # --local-root mode: files already on disk
+                abs_paths = [local_paths_map[p] for p in parts]
+                members = _read_local_archive_members(
+                    local_paths=abs_paths,
+                    archive_stem=archive_stem,
+                    tqdm_position=pos,
+                )
+            elif cache_dir is not None:
+                # --cache-dir mode: download then read locally
+                downloaded = _download_archive_parts(
                     gcs_prefix=gcs_prefix,
                     archive_stem=archive_stem,
                     parts=parts,
@@ -447,11 +535,12 @@ def build_archive_index(
                     tqdm_position=pos,
                 )
                 members = _read_local_archive_members(
-                    local_paths=local_paths,
+                    local_paths=downloaded,
                     archive_stem=archive_stem,
                     tqdm_position=pos,
                 )
             else:
+                # GCS streaming mode (no local cache)
                 members = _stream_archive_members(
                     gcs_prefix=gcs_prefix,
                     archive_stem=archive_stem,
@@ -487,10 +576,11 @@ def build_archive_index(
                     archive_stem, parts, member_paths = future.result()
                     archive_id = archive_stem
 
+                    source_uri = gcs_prefix or local_root or ''
                     conn.execute(
                         'INSERT INTO archives (archive_id, gcs_prefix, archive_stem, parts_json) '
                         'VALUES (?, ?, ?, ?)',
-                        (archive_id, gcs_prefix, archive_stem,
+                        (archive_id, source_uri, archive_stem,
                          json.dumps(parts, ensure_ascii=False)))
 
                     rows = [(mp, archive_id, mp) for mp in member_paths]
@@ -514,15 +604,22 @@ def build_archive_index(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Build a SQLite index for split tar.gz archives in GCS')
-    parser.add_argument('--gcs-prefix', required=True, help='GCS prefix that contains archive shard parts')
+    parser = argparse.ArgumentParser(
+        description='Build a SQLite index for split tar.gz archives in GCS or on local disk.')
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument('--gcs-prefix', help='GCS prefix that contains archive shard parts')
+    source.add_argument('--local-root',
+                        help='Local directory containing downloaded archive parts. '
+                             'The first directory level is stripped so that archive '
+                             'stems match the GCS layout (e.g. '
+                             'local-root/QVHighlight/qvhighlights/videos.tar.gz.00 '
+                             '→ stem qvhighlights/videos.tar.gz).')
     parser.add_argument('--output', required=True, help='Output SQLite path')
     parser.add_argument('--num-workers', type=int, default=1,
                         help='Number of archives to process in parallel (default: 1)')
     parser.add_argument('--cache-dir',
-                        help='Local directory to cache downloaded archive parts. '
-                             'Cached parts are reused across runs so the same data '
-                             'is never downloaded twice.')
+                        help='(GCS mode only) Local directory to cache downloaded '
+                             'archive parts so the same data is never downloaded twice.')
     return parser.parse_args()
 
 
@@ -530,6 +627,7 @@ def main() -> int:
     args = parse_args()
     build_archive_index(
         gcs_prefix=args.gcs_prefix,
+        local_root=args.local_root,
         output_path=args.output,
         cache_dir=args.cache_dir,
         num_workers=args.num_workers,
