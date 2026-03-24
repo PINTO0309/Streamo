@@ -171,13 +171,16 @@ hf download maifoundations/Streamo-Instruct-465K \
 python scripts/build_stream_archive_index.py \
 --gcs-prefix gs://xxxxx-persistent/datasets \
 --output ./dataset/stream/archive_index.sqlite \
+--cache-dir ./dataset/stream/.cache \
 --num-workers 8
 
 # 2. アーカイブモードでデータセットを準備
 python scripts/prepare_streamo_training_data.py \
 --label-root dataset/Streamo-Instruct-465K \
 --archive-index ./dataset/stream/archive_index.sqlite \
---output-stream ./dataset/stream/stream_format.json
+--output-stream ./dataset/stream/stream_format.json \
+--fps 1.0 \
+--num-workers 8
 
 ########## ローカルモード用
 python scripts/prepare_streamo_training_data.py \
