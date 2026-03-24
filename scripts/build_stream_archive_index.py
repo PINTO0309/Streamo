@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """Build a SQLite index for split tar.gz archives stored in GCS.
 
-Archives are streamed directly from GCS — no local download or disk space
-is required.  Only tar member headers are inspected; file contents are
-discarded during the streaming read.
+When ``--cache-dir`` is given, archive parts are downloaded to local disk
+first and reused across runs — the same part is never downloaded twice.
+Without ``--cache-dir``, archives are streamed directly from GCS (no local
+disk needed, but every run re-downloads).
 """
 
 import argparse
@@ -107,19 +108,37 @@ def _list_archive_parts(gcs_prefix: str, storage_client: Optional[Any] = None) -
 # ---------------------------------------------------------------------------
 
 class _ConcatenatedStream:
-    """Concatenate multiple file-like objects into one readable stream."""
+    """Concatenate multiple GCS blobs into one readable stream.
 
-    def __init__(self, streams: List[io.IOBase]):
-        self._streams = streams
+    Blobs are opened lazily — only the currently-read part has an active
+    connection.  This avoids idle-connection timeouts and reduces the number
+    of concurrent HTTP sessions.
+    """
+
+    def __init__(self, blob_openers: List):
+        """``blob_openers`` is a list of zero-arg callables, each returning a
+        readable file-like object (e.g. ``lambda: blob.open('rb')``)."""
+        self._openers = blob_openers
         self._idx = 0
+        self._current: Optional[io.IOBase] = None
+
+    def _ensure_stream(self) -> bool:
+        """Open the next stream if needed.  Return False when exhausted."""
+        if self._current is not None:
+            return True
+        if self._idx >= len(self._openers):
+            return False
+        self._current = self._openers[self._idx]()
+        return True
 
     def read(self, size: int = -1) -> bytes:
         chunks: List[bytes] = []
         remaining = size
-        while self._idx < len(self._streams):
-            chunk = self._streams[self._idx].read(remaining if remaining > 0 else -1)
+        while self._ensure_stream():
+            chunk = self._current.read(remaining if remaining > 0 else -1)
             if not chunk:
-                self._streams[self._idx].close()
+                self._current.close()
+                self._current = None
                 self._idx += 1
                 continue
             chunks.append(chunk)
@@ -130,9 +149,10 @@ class _ConcatenatedStream:
         return b''.join(chunks)
 
     def close(self) -> None:
-        for stream in self._streams[self._idx:]:
-            stream.close()
-        self._idx = len(self._streams)
+        if self._current is not None:
+            self._current.close()
+            self._current = None
+        self._idx = len(self._openers)
 
     def __enter__(self):
         return self
@@ -180,6 +200,105 @@ def _get_total_blob_size(
     return total
 
 
+# ---------------------------------------------------------------------------
+# Local-cache download & read
+# ---------------------------------------------------------------------------
+
+def _download_archive_parts(
+    *,
+    gcs_prefix: str,
+    archive_stem: str,
+    parts: List[str],
+    cache_dir: str,
+    storage_client: Optional[Any] = None,
+    tqdm_position: Optional[int] = None,
+) -> List[str]:
+    """Download archive parts to *cache_dir*.  Already-cached parts (whose
+    local size matches the remote blob size) are skipped."""
+    client = _get_storage_client(storage_client)
+    bucket_name, blob_prefix = _parse_gs_uri(gcs_prefix)
+    bucket = client.bucket(bucket_name)
+
+    local_paths: List[str] = []
+    for part in parts:
+        object_name = _join_gcs_object_path(blob_prefix, part)
+        blob = bucket.blob(object_name)
+        blob.reload()
+
+        local_path = os.path.join(cache_dir, part)
+        local_paths.append(local_path)
+
+        # Skip if already cached with correct size
+        if os.path.exists(local_path):
+            local_size = os.path.getsize(local_path)
+            if blob.size is not None and local_size == blob.size:
+                logger.debug(f'Cache hit: {part} ({local_size:,} bytes)')
+                continue
+
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        partial_path = f'{local_path}.partial'
+
+        progress = tqdm(
+            total=blob.size,
+            desc=f'  DL {os.path.basename(part)}',
+            unit='B',
+            unit_scale=True,
+            unit_divisor=1024,
+            leave=False,
+            dynamic_ncols=True,
+            position=tqdm_position,
+        )
+        with progress:
+            with blob.open('rb') as src, open(partial_path, 'wb') as dst:
+                while True:
+                    chunk = src.read(8 * 1024 * 1024)  # 8 MiB
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+                    progress.update(len(chunk))
+
+        os.replace(partial_path, local_path)
+        logger.debug(f'Downloaded {part} → {local_path}')
+
+    return local_paths
+
+
+def _read_local_archive_members(
+    *,
+    local_paths: List[str],
+    archive_stem: str,
+    tqdm_position: Optional[int] = None,
+) -> List[str]:
+    """Read tar member file paths from locally-cached archive parts."""
+    total_size = sum(os.path.getsize(p) for p in local_paths)
+
+    file_openers = [lambda p=p: open(p, 'rb') for p in local_paths]
+
+    members: List[str] = []
+    with _ConcatenatedStream(file_openers) as raw_stream:
+        progress = tqdm(
+            total=total_size,
+            desc=f'  Reading {archive_stem}',
+            unit='B',
+            unit_scale=True,
+            unit_divisor=1024,
+            leave=False,
+            dynamic_ncols=True,
+            position=tqdm_position,
+        )
+        with progress, _ProgressStream(raw_stream, progress) as stream:
+            with tarfile.open(fileobj=stream, mode='r|gz') as tar:
+                for member in tar:
+                    if member.isfile():
+                        members.append(_normalize_relative_posix_path(member.name))
+                        progress.set_postfix(files=len(members), refresh=False)
+    return members
+
+
+# ---------------------------------------------------------------------------
+# GCS-only streaming (fallback when no cache_dir)
+# ---------------------------------------------------------------------------
+
 def _stream_archive_members(
     *,
     gcs_prefix: str,
@@ -199,14 +318,14 @@ def _stream_archive_members(
 
     total_size = _get_total_blob_size(bucket, blob_prefix, parts)
 
-    blob_streams: List[io.IOBase] = []
+    blob_openers = []
     for part in parts:
         object_name = _join_gcs_object_path(blob_prefix, part)
         blob = bucket.blob(object_name)
-        blob_streams.append(blob.open('rb'))
+        blob_openers.append(lambda b=blob: b.open('rb'))
 
     members: List[str] = []
-    with _ConcatenatedStream(blob_streams) as raw_stream:
+    with _ConcatenatedStream(blob_openers) as raw_stream:
         progress = tqdm(
             total=total_size,
             desc=f'  Streaming {archive_stem}',
@@ -233,19 +352,19 @@ def _stream_archive_members(
 
 def _create_schema(conn: sqlite3.Connection) -> None:
     conn.executescript("""
-        CREATE TABLE archives (
+        CREATE TABLE IF NOT EXISTS archives (
             archive_id TEXT PRIMARY KEY,
             gcs_prefix TEXT NOT NULL,
             archive_stem TEXT NOT NULL,
             parts_json TEXT NOT NULL
         );
-        CREATE TABLE files (
+        CREATE TABLE IF NOT EXISTS files (
             logical_path TEXT PRIMARY KEY,
             archive_id TEXT NOT NULL,
             member_path TEXT NOT NULL,
             FOREIGN KEY (archive_id) REFERENCES archives(archive_id)
         );
-        CREATE INDEX idx_files_archive_id ON files(archive_id);
+        CREATE INDEX IF NOT EXISTS idx_files_archive_id ON files(archive_id);
     """)
 
 
@@ -257,18 +376,22 @@ def build_archive_index(
     *,
     gcs_prefix: str,
     output_path: str,
-    scratch_dir: Optional[str] = None,
+    cache_dir: Optional[str] = None,
     storage_client: Optional[Any] = None,
     num_workers: int = 1,
 ) -> str:
-    """Build a SQLite index by streaming archives from GCS.
+    """Build a SQLite index for archives in GCS.
 
-    ``scratch_dir`` is accepted for backward compatibility but ignored —
-    archives are no longer downloaded to local disk.
+    When *cache_dir* is given, archive parts are downloaded once and reused
+    on subsequent runs.  Without it, archives are streamed directly from GCS
+    each time.
 
-    ``num_workers`` controls how many archives are streamed in parallel.
+    ``num_workers`` controls how many archives are processed in parallel.
     """
-    del scratch_dir  # no longer used
+    if cache_dir is not None:
+        cache_dir = os.path.abspath(os.path.expanduser(cache_dir))
+        os.makedirs(cache_dir, exist_ok=True)
+        logger.info(f'Using local cache: {cache_dir}')
 
     archive_parts = _list_archive_parts(gcs_prefix, storage_client=storage_client)
     if not archive_parts:
@@ -279,12 +402,24 @@ def build_archive_index(
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    temp_output = f'{output_path}.tmp'
-    if os.path.exists(temp_output):
-        os.remove(temp_output)
-
     num_workers = max(1, num_workers)
-    sorted_stems = sorted(archive_parts)
+
+    # -- detect already-indexed archives for resume -------------------------
+    done_stems: set = set()
+    if os.path.exists(output_path):
+        with sqlite3.connect(output_path) as conn:
+            _create_schema(conn)  # ensure tables exist (handles older DBs)
+            rows = conn.execute('SELECT archive_stem FROM archives').fetchall()
+            done_stems = {r[0] for r in rows}
+        if done_stems:
+            logger.info(
+                f'Resuming: {len(done_stems)} archive(s) already indexed, '
+                f'skipping: {sorted(done_stems)}')
+
+    pending_stems = sorted(s for s in archive_parts if s not in done_stems)
+    if not pending_stems:
+        logger.info('All archives already indexed — nothing to do.')
+        return output_path
 
     # -- tqdm position pool for concurrent per-archive progress bars --------
     _position_lock = threading.Lock()
@@ -302,33 +437,51 @@ def build_archive_index(
         parts = archive_parts[archive_stem]
         pos = _acquire_position()
         try:
-            members = _stream_archive_members(
-                gcs_prefix=gcs_prefix,
-                archive_stem=archive_stem,
-                parts=parts,
-                storage_client=storage_client,
-                tqdm_position=pos,
-            )
+            if cache_dir is not None:
+                local_paths = _download_archive_parts(
+                    gcs_prefix=gcs_prefix,
+                    archive_stem=archive_stem,
+                    parts=parts,
+                    cache_dir=cache_dir,
+                    storage_client=storage_client,
+                    tqdm_position=pos,
+                )
+                members = _read_local_archive_members(
+                    local_paths=local_paths,
+                    archive_stem=archive_stem,
+                    tqdm_position=pos,
+                )
+            else:
+                members = _stream_archive_members(
+                    gcs_prefix=gcs_prefix,
+                    archive_stem=archive_stem,
+                    parts=parts,
+                    storage_client=storage_client,
+                    tqdm_position=pos,
+                )
         finally:
             _release_position(pos)
         return archive_stem, parts, members
 
     # -- run workers and collect results into SQLite ------------------------
-    with sqlite3.connect(temp_output) as conn:
+    with sqlite3.connect(output_path) as conn:
         _create_schema(conn)
 
         overall = tqdm(
-            total=len(sorted_stems),
+            total=len(pending_stems),
+            initial=0,
             desc='Processing archives',
             unit=' archives',
             dynamic_ncols=True,
             position=0,
         )
+        if done_stems:
+            overall.set_postfix(skipped=len(done_stems), refresh=True)
         with overall:
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
                 futures = {
                     executor.submit(_worker, stem): stem
-                    for stem in sorted_stems
+                    for stem in pending_stems
                 }
                 for future in as_completed(futures):
                     archive_stem, parts, member_paths = future.result()
@@ -356,7 +509,6 @@ def build_archive_index(
                     overall.set_postfix(last=archive_stem, refresh=False)
                     logger.info(f'Indexed {len(rows)} files from `{archive_stem}`')
 
-    os.replace(temp_output, output_path)
     logger.info(f'Saved archive index to {output_path}')
     return output_path
 
@@ -366,8 +518,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--gcs-prefix', required=True, help='GCS prefix that contains archive shard parts')
     parser.add_argument('--output', required=True, help='Output SQLite path')
     parser.add_argument('--num-workers', type=int, default=1,
-                        help='Number of archives to stream in parallel (default: 1)')
-    parser.add_argument('--scratch-dir', help='(ignored) Kept for backward compatibility')
+                        help='Number of archives to process in parallel (default: 1)')
+    parser.add_argument('--cache-dir',
+                        help='Local directory to cache downloaded archive parts. '
+                             'Cached parts are reused across runs so the same data '
+                             'is never downloaded twice.')
     return parser.parse_args()
 
 
@@ -376,7 +531,7 @@ def main() -> int:
     build_archive_index(
         gcs_prefix=args.gcs_prefix,
         output_path=args.output,
-        scratch_dir=args.scratch_dir,
+        cache_dir=args.cache_dir,
         num_workers=args.num_workers,
     )
     return 0
