@@ -45,4 +45,5 @@ dependencies = [
   "trl==0.23.1",
   "uvicorn==0.40.0",
   "zstandard==0.25.0",
+  "opencv-python==4.13.0.92",
 ]
