@@ -31,6 +31,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from convert_streaming_video import convert_format_to_stream  # noqa: E402
+from tqdm import tqdm  # noqa: E402
 
 
 VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v'}
@@ -200,7 +201,8 @@ def iter_index_roots(media_root: Path) -> List[Path]:
 def build_basename_index(media_root: Path) -> Dict[str, List[str]]:
     index: Dict[str, List[str]] = defaultdict(list)
     seen_paths = set()
-    for root in iter_index_roots(media_root):
+    roots = iter_index_roots(media_root)
+    for root in tqdm(roots, desc='Scanning video dirs', unit=' dirs', dynamic_ncols=True):
         for path in root.rglob('*'):
             if not path.is_file() or path.suffix.lower() not in VIDEO_EXTENSIONS:
                 continue
@@ -316,12 +318,15 @@ def convert_rows_to_stream(
 
     with ThreadPoolExecutor(max_workers=max(1, num_workers)) as executor:
         futures = {executor.submit(_convert_to_stream_worker, args): args[0] for args in worker_args}
-        for future in as_completed(futures):
+        pbar = tqdm(as_completed(futures), total=len(futures),
+                    desc='Converting to stream', unit=' rows', dynamic_ncols=True)
+        for future in pbar:
             idx, result = future.result()
             if result is None:
                 failed_indices.append(idx)
             else:
                 results_by_index[idx] = result
+            pbar.set_postfix(ok=len(results_by_index), fail=len(failed_indices), refresh=False)
 
     converted_rows = [results_by_index[idx] for idx in sorted(results_by_index)]
     ensure_parent_dir(output_path)
@@ -379,7 +384,9 @@ def prepare_streamo_training_data(args: argparse.Namespace) -> Dict[str, Any]:
     total_rows = 0
     filtered_rows = 0
 
-    for label_file in label_files:
+    pbar = tqdm(label_files, desc='Resolving labels', unit=' files', dynamic_ncols=True)
+    for label_file in pbar:
+        pbar.set_postfix(file=label_file.stem, refresh=False)
         data = json.loads(label_file.read_text(encoding='utf-8'))
         rows = [data] if isinstance(data, dict) else data
         for row in rows:
