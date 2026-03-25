@@ -15,7 +15,7 @@ dependencies = [
   "datasets==3.6.0",
   "einops==0.8.2",
   "fastapi==0.128.0",
-  "flash-attn==2.7.4",
+  "flash-attn>=2.7.4",
   "gradio==6.5.1",
   "google-cloud-storage==3.4.1",
   "importlib_metadata==8.7.1",
@@ -48,3 +48,6 @@ dependencies = [
   "zstandard==0.25.0",
   "opencv-python==4.13.0.92",
 ]
+
+[tool.uv.sources]
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.7cxx11abiTRUE-cp310-cp310-linux_x86_64.whl" }
