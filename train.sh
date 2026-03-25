@@ -60,11 +60,8 @@ export TORCH_DISTRIBUTED_DEBUG=DETAIL
 ### Single-GPU
 export NCCL_IB_DISABLE=1
 export NCCL_SOCKET_IFNAME=ens6
-export MPI_LOCALNRANKS=1
-export OMPI_MCA_btl=^openib
-NPROC_PER_NODE=1 \
 CUDA_VISIBLE_DEVICES=0 \
-uv run swift sft \
+uv run python swift/cli/sft.py \
 --model Qwen/Qwen3-VL-2B-Instruct \
 --dataset streaming_video \
 --train_type full \
