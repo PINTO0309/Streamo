@@ -23,6 +23,7 @@ export MIN_PIXELS=3136
 export MAX_PIXELS=100352
 export USE_HF=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce memory fragmentation
+mkdir -p /mnt/data/downloads/stream
 export STREAM_FRAME_CACHE_DIR=/mnt/data/downloads/stream/frames
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
