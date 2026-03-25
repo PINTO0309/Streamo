@@ -72,3 +72,4 @@ flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/down
 [tool.uv]
 index-url = "https://pypi.org/simple"
 extra-index-url = ["https://download.pytorch.org/whl/cu128"]
+index-strategy = "unsafe-best-match"
