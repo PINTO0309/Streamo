@@ -24,6 +24,7 @@ export MAX_PIXELS=100352
 export USE_HF=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce memory fragmentation
 export STREAM_FRAME_CACHE_DIR=/mnt/data/downloads/stream/frames
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
 # NPROC_PER_NODE=8 \
 # CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
