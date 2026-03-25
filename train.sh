@@ -21,6 +21,7 @@
 
 export MIN_PIXELS=3136
 export MAX_PIXELS=100352
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce memory fragmentation
 
 # NPROC_PER_NODE=8 \
 # CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -55,7 +56,7 @@ export MAX_PIXELS=100352
 NPROC_PER_NODE=1 \
 CUDA_VISIBLE_DEVICES=0 \
 swift sft \
---model Qwen2.5-VL-3B-Instruct \
+--model Qwen/Qwen3-VL-2B-Instruct \
 --dataset streaming_video \
 --train_type full \
 --torch_dtype bfloat16 \
