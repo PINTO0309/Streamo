@@ -26,6 +26,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce memory fragmen
 export STREAM_FRAME_CACHE_DIR=/mnt/data/downloads/stream/frames
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
+### Multi-GPU
 # NPROC_PER_NODE=8 \
 # CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 # swift sft \
@@ -56,6 +57,7 @@ export TORCH_DISTRIBUTED_DEBUG=DETAIL
 # --dataloader_num_workers 4 \
 # --new_special_tokens './special_token_v1.txt'
 
+### Single-GPU
 NPROC_PER_NODE=1 \
 CUDA_VISIBLE_DEVICES=0 \
 uv run swift sft \
@@ -79,7 +81,6 @@ uv run swift sft \
 --logging_steps 5 \
 --output_dir output \
 --warmup_ratio 0.05 \
-# --deepspeed zero3 \
 --use_liger_kernel true \
 --max_length 32768 \
 --dataset_num_proc 4 \
