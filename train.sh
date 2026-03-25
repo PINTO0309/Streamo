@@ -21,6 +21,7 @@
 
 export MIN_PIXELS=3136
 export MAX_PIXELS=100352
+export USE_HF=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce memory fragmentation
 
 # NPROC_PER_NODE=8 \
