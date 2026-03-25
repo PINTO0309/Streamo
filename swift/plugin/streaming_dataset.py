@@ -14,7 +14,7 @@ Performance optimizations:
 """
 
 from swift.llm.dataset.dataset import ArchiveVideoResolver, register_streaming_video_dataset
-from .streaming_dataset_config import (
+from swift.plugin.streaming_dataset_config import (
     resolve_streaming_archive_cache_dir,
     resolve_streaming_archive_gcs_prefix,
     resolve_streaming_archive_index_path,
