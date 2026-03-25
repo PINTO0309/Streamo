@@ -22,6 +22,7 @@ dependencies = [
   "importlib_metadata==8.7.1",
   "jieba==0.42.1",
   "json_repair==0.55.2",
+  "liger-kernel==0.6.5",
   "matplotlib==3.10.8",
   "modelscope==1.34.0",
   "msgspec==0.18.0",
