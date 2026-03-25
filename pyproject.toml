@@ -13,6 +13,7 @@ dependencies = [
   "cpm_kernels==1.0.11",
   "dacite==1.9.2",
   "datasets==3.6.0",
+  "deepspeed==0.18.5",
   "einops==0.8.2",
   "fastapi==0.128.0",
   "flash-attn>=2.7.4",
