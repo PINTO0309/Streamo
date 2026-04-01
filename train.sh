@@ -10,8 +10,8 @@ export TORCH_DISTRIBUTED_DEBUG=DETAIL
 ### Multi-GPU
 # NPROC_PER_NODE=8 \
 # CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-# uv run swift sft \
-# --model Qwen2.5-VL-3B-Instruct \
+# python -m torch.distributed.run --nproc_per_node 8 swift/cli/sft.py \
+# --model Qwen/Qwen3-VL-2B-Instruct \
 # --dataset streaming_video \
 # --train_type full \
 # --torch_dtype bfloat16 \
