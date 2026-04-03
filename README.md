@@ -42,6 +42,36 @@ pip install -r requirements.txt
 pip install google-cloud-storage
 ```
 
+## Streaming Inference Demo
+
+Use `examples/infer/streaming_action_caption_demo.py` for round-by-round streaming inference with trained weights. The recommended backend is `pt`; `vllm` is supported as an optional path for the same CLI.
+
+Full checkpoint / merged model example:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python examples/infer/streaming_action_caption_demo.py \
+--model-path /path/to/full_or_merged_checkpoint \
+--video-path demo/cook.mp4 \
+--mode caption \
+--realtime false \
+--save-jsonl output/stream_demo.jsonl
+```
+
+Adapter example:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python examples/infer/streaming_action_caption_demo.py \
+--adapter-path /path/to/adapter_checkpoint \
+--video-path demo/cook.mp4 \
+--mode qa \
+--question "What is being added to the bowl?" \
+--realtime false
+```
+
+The script prints each round as `<Xs-Ys>` plus the model output, emits a separate event log only for new `</Response>` turns, and can optionally persist one JSONL record per round.
+
 ## Data Preparation📊
 
 ### Data Pipeline Overview

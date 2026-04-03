@@ -37,6 +37,36 @@
 pip install -r requirements.txt
 ```
 
+## Streaming Inference Demo
+
+学習済み重みを使った round-by-round のストリーミング推論には `examples/infer/streaming_action_caption_demo.py` を使います。推奨 backend は `pt` で、`vllm` は同じ CLI の任意オプションとして扱います。
+
+full checkpoint / merged model の例:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python examples/infer/streaming_action_caption_demo.py \
+--model-path /path/to/full_or_merged_checkpoint \
+--video-path demo/cook.mp4 \
+--mode caption \
+--realtime false \
+--save-jsonl output/stream_demo.jsonl
+```
+
+adapter の例:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python examples/infer/streaming_action_caption_demo.py \
+--adapter-path /path/to/adapter_checkpoint \
+--video-path demo/cook.mp4 \
+--mode qa \
+--question "What is being added to the bowl?" \
+--realtime false
+```
+
+このスクリプトは各 round を `<Xs-Ys>` とモデル出力で逐次表示し、新しい `</Response>` だけを event log として別表示します。必要なら 1 round 1 record の JSONL も保存できます。
+
 ## Data Preparation📊
 
 ### Data Pipeline Overview
