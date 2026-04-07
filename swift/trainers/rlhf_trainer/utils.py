@@ -4,7 +4,7 @@ import math
 import os
 import time
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, field as dataclass_field
 from functools import partial
 from io import BytesIO
 from types import MethodType
@@ -13,13 +13,17 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple, Un
 import datasets
 import torch
 import torch.nn.functional as F
-from msgspec import field
 from peft.tuners import lora
 from peft.tuners.lora import LoraLayer
 from PIL import Image
 from pydantic import BaseModel, field_validator
 from torch import nn
 from torch.utils.data import DataLoader, RandomSampler
+
+try:
+    from msgspec import field
+except ImportError:
+    field = dataclass_field
 
 from swift.utils import is_swanlab_available, is_vllm_available, is_wandb_available
 
@@ -33,20 +37,24 @@ if TYPE_CHECKING:
 
 TensorLoRARequest = None
 if is_vllm_available():
-    from vllm.lora.request import LoRARequest
+    try:
+        from vllm.lora.request import LoRARequest
+    except ImportError:
+        LoRARequest = None
+    else:
 
-    class TensorLoRARequest(LoRARequest):
-        peft_config: dict = field(default=None)
-        lora_tensors: dict = field(default=None)
-        lora_embeddings: Optional[Dict[str, torch.Tensor]] = None
+        class TensorLoRARequest(LoRARequest):
+            peft_config: dict = field(default=None)
+            lora_tensors: dict = field(default=None)
+            lora_embeddings: Optional[Dict[str, torch.Tensor]] = None
 
-        @property
-        def config(self):
-            return self.peft_config
+            @property
+            def config(self):
+                return self.peft_config
 
-        @property
-        def embeddings(self):
-            return self.lora_embeddings
+            @property
+            def embeddings(self):
+                return self.lora_embeddings
 
 
 def round_robin(num_reqs, num_workers):
