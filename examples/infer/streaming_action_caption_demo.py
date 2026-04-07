@@ -3,10 +3,11 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import IO, Dict, Optional, Tuple
+from typing import IO, Dict, List, Optional, Sequence, Tuple
 
 import cv2
-from PIL import Image
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 
 os.environ.setdefault('MIN_PIXELS', '3136')
@@ -40,6 +41,14 @@ STATE_SILENCE = '</Silence>'
 STATE_STANDBY = '</Standby>'
 STATE_RESPONSE = '</Response>'
 RESPONSE_PREFIXES = (STATE_RESPONSE, STATE_STANDBY, STATE_SILENCE)
+DEFAULT_SUBTITLE_MAX_LINES = 4
+SUBTITLE_FONT_CANDIDATES = (
+    '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+    '/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc',
+    '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+    '/usr/share/fonts/truetype/noto/NotoSerifCJK-Regular.ttc',
+    '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+)
 
 
 def str2bool(value: str) -> bool:
@@ -229,6 +238,241 @@ def write_jsonl_record(handle: IO[str], record: Dict) -> None:
     handle.flush()
 
 
+def build_round_record(
+    *,
+    round_num: int,
+    start_sec: float,
+    end_sec: float,
+    response: str,
+    response_type: str,
+    response_body: str,
+    is_new_event: bool,
+) -> Dict:
+    return {
+        'round': round_num,
+        'start_sec': start_sec,
+        'end_sec': end_sec,
+        'response': response,
+        'response_type': response_type,
+        'response_body': response_body,
+        'is_new_event': is_new_event,
+        'subtitle_text': build_subtitle_text(response_type, response_body),
+    }
+
+
+def build_subtitle_text(response_type: str, response_body: str) -> str:
+    if response_type != STATE_RESPONSE:
+        return ''
+    subtitle_text = response_body.strip()
+    return subtitle_text or STATE_RESPONSE
+
+
+def load_subtitle_font(font_path: Optional[str], font_size: int):
+    candidates: List[str] = []
+    if font_path:
+        candidates.append(font_path)
+    candidates.extend(SUBTITLE_FONT_CANDIDATES)
+    for candidate in candidates:
+        if not candidate or not Path(candidate).exists():
+            continue
+        try:
+            return ImageFont.truetype(candidate, font_size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def text_width(draw: ImageDraw.ImageDraw, text: str, font) -> int:
+    if not text:
+        return 0
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0]
+
+
+def fit_text_with_ellipsis(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> str:
+    if text_width(draw, text, font) <= max_width:
+        return text
+    ellipsis = '...'
+    trimmed = text.rstrip()
+    while trimmed and text_width(draw, f'{trimmed}{ellipsis}', font) > max_width:
+        trimmed = trimmed[:-1].rstrip()
+    return f'{trimmed}{ellipsis}' if trimmed else ellipsis
+
+
+def wrap_subtitle_text(
+    *,
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font,
+    max_width: int,
+    max_lines: int,
+) -> List[str]:
+    if not text:
+        return []
+    lines: List[str] = []
+    paragraphs = text.splitlines() or ['']
+    for paragraph_idx, paragraph in enumerate(paragraphs):
+        current = ''
+        for char in paragraph:
+            candidate = current + char
+            if current and text_width(draw, candidate, font) > max_width:
+                lines.append(current.rstrip())
+                if len(lines) >= max_lines:
+                    lines[-1] = fit_text_with_ellipsis(draw, lines[-1], font, max_width)
+                    return lines
+                current = char.lstrip() if char.isspace() else char
+            else:
+                current = candidate
+        if current or not paragraph:
+            lines.append(current.rstrip())
+            if len(lines) >= max_lines:
+                has_remaining = paragraph_idx < len(paragraphs) - 1
+                if has_remaining:
+                    lines[-1] = fit_text_with_ellipsis(draw, lines[-1], font, max_width)
+                return lines
+    return [line for line in lines if line]
+
+
+def draw_subtitle_on_frame(
+    frame: np.ndarray,
+    subtitle_text: str,
+    *,
+    font_path: Optional[str],
+    max_lines: int,
+) -> np.ndarray:
+    if not subtitle_text:
+        return frame
+
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    image = Image.fromarray(frame_rgb).convert('RGBA')
+    overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    width, height = image.size
+    horizontal_margin = max(24, width // 18)
+    vertical_margin = max(20, height // 20)
+    font_size = max(18, height // 20)
+    font = load_subtitle_font(font_path, font_size)
+    lines = wrap_subtitle_text(
+        draw=draw,
+        text=subtitle_text,
+        font=font,
+        max_width=width - (horizontal_margin * 2),
+        max_lines=max_lines,
+    )
+    if not lines:
+        return frame
+
+    line_spacing = max(6, font_size // 4)
+    line_heights: List[int] = []
+    line_widths: List[int] = []
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_widths.append(bbox[2] - bbox[0])
+        line_heights.append(bbox[3] - bbox[1])
+
+    padding_x = max(16, width // 40)
+    padding_y = max(12, height // 45)
+    text_block_height = sum(line_heights) + line_spacing * max(0, len(lines) - 1)
+    box_height = text_block_height + padding_y * 2
+    box_top = max(0, height - vertical_margin - box_height)
+    box_bottom = min(height, height - vertical_margin)
+    draw.rounded_rectangle(
+        [horizontal_margin, box_top, width - horizontal_margin, box_bottom],
+        radius=max(10, min(width, height) // 60),
+        fill=(0, 0, 0, 176),
+    )
+
+    y = box_top + padding_y
+    stroke_width = max(1, font_size // 18)
+    for line, line_width, line_height in zip(lines, line_widths, line_heights):
+        x = (width - line_width) / 2
+        draw.text(
+            (x, y),
+            line,
+            font=font,
+            fill=(255, 255, 255, 255),
+            stroke_width=stroke_width,
+            stroke_fill=(0, 0, 0, 255),
+        )
+        y += line_height + line_spacing
+
+    composed = Image.alpha_composite(image, overlay).convert('RGB')
+    return cv2.cvtColor(np.array(composed), cv2.COLOR_RGB2BGR)
+
+
+def video_fourcc_for_path(path: str) -> int:
+    suffix = Path(path).suffix.lower()
+    return cv2.VideoWriter_fourcc(*('mp4v' if suffix == '.mp4' else 'MJPG'))
+
+
+def subtitle_for_time(
+    *,
+    time_sec: float,
+    fps: float,
+    round_records: Sequence[Dict],
+    extend_last_subtitle: bool,
+) -> str:
+    if not round_records:
+        return ''
+    if time_sec >= round_records[-1]['end_sec'] and not extend_last_subtitle:
+        return ''
+    round_idx = min(max(int(time_sec * fps), 0), len(round_records) - 1)
+    return round_records[round_idx].get('subtitle_text', '')
+
+
+def render_subtitle_video(
+    *,
+    video_path: str,
+    output_path: str,
+    fps: float,
+    round_records: Sequence[Dict],
+    font_path: Optional[str],
+    max_lines: int,
+    extend_last_subtitle: bool,
+) -> None:
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f'Cannot open video for subtitle rendering: {video_path}')
+
+    original_fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if original_fps <= 0:
+        cap.release()
+        raise ValueError(f'Invalid FPS for video: {video_path}')
+
+    writer = cv2.VideoWriter(output_path, video_fourcc_for_path(output_path), original_fps, (width, height))
+    if not writer.isOpened():
+        cap.release()
+        raise ValueError(f'Cannot open video writer: {output_path}')
+
+    try:
+        frame_idx = 0
+        while True:
+            success, frame = cap.read()
+            if not success:
+                break
+            subtitle_text = subtitle_for_time(
+                time_sec=frame_idx / original_fps,
+                fps=fps,
+                round_records=round_records,
+                extend_last_subtitle=extend_last_subtitle,
+            )
+            if subtitle_text:
+                frame = draw_subtitle_on_frame(
+                    frame,
+                    subtitle_text,
+                    font_path=font_path,
+                    max_lines=max_lines,
+                )
+            writer.write(frame)
+            frame_idx += 1
+    finally:
+        cap.release()
+        writer.release()
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Streaming action_caption demo for Streamo checkpoints.')
     parser.add_argument('--model-path', default=None, help='Full checkpoint / merged model path.')
@@ -245,6 +489,10 @@ def parse_args():
                         help='Sleep between rounds to simulate streaming playback.')
     parser.add_argument('--sleep-sec', type=float, default=1.0, help='Sleep duration used when --realtime true.')
     parser.add_argument('--save-jsonl', default=None, help='Optional JSONL output path for round-level records.')
+    parser.add_argument('--save-video', default=None, help='Optional output video path with rendered subtitles.')
+    parser.add_argument('--subtitle-font-path', default=None, help='Optional font path for subtitle rendering.')
+    parser.add_argument('--subtitle-max-lines', type=int, default=DEFAULT_SUBTITLE_MAX_LINES,
+                        help='Maximum subtitle lines rendered into --save-video.')
     parser.add_argument('--stop-on-response', type=str2bool, default=False,
                         help='Stop after the first </Response>.')
     args = parser.parse_args()
@@ -252,6 +500,8 @@ def parse_args():
         parser.error('--fps must be > 0.')
     if args.window_size <= 0:
         parser.error('--window-size must be > 0.')
+    if args.subtitle_max_lines <= 0:
+        parser.error('--subtitle-max-lines must be > 0.')
     if args.mode == 'qa' and not args.question:
         parser.error('--question is required when --mode qa.')
     if not args.model_path and not args.adapter_path:
@@ -263,8 +513,10 @@ def main():
     args = parse_args()
     question = args.question or DEFAULT_CAPTION_QUESTION
     jsonl_path = ensure_parent_dir(args.save_jsonl)
+    video_output_path = ensure_parent_dir(args.save_video)
     jsonl_handle: Optional[IO[str]] = None
     video_extractor = None
+    round_records: List[Dict] = []
 
     try:
         engine, resolved_model_path = load_engine(
@@ -291,6 +543,8 @@ def main():
         print(f'total_rounds: {total_rounds}')
         if jsonl_path is not None:
             print(f'save_jsonl: {jsonl_path}')
+        if video_output_path is not None:
+            print(f'save_video: {video_output_path}')
 
         from swift.llm import InferRequest
 
@@ -323,16 +577,19 @@ def main():
             if is_new_event:
                 print(f'[event] {response}')
 
+            round_record = build_round_record(
+                round_num=round_num,
+                start_sec=start_sec,
+                end_sec=end_sec,
+                response=response,
+                response_type=response_type,
+                response_body=response_body,
+                is_new_event=is_new_event,
+            )
+            round_records.append(round_record)
+
             if jsonl_handle is not None:
-                write_jsonl_record(jsonl_handle, {
-                    'round': round_num,
-                    'start_sec': start_sec,
-                    'end_sec': end_sec,
-                    'response': response,
-                    'response_type': response_type,
-                    'response_body': response_body,
-                    'is_new_event': is_new_event,
-                })
+                write_jsonl_record(jsonl_handle, round_record)
 
             previous_answer = response
             if args.stop_on_response and response_type == STATE_RESPONSE:
@@ -340,6 +597,18 @@ def main():
                 break
             if args.realtime and round_num < total_rounds - 1:
                 time.sleep(args.sleep_sec)
+
+        if video_output_path is not None:
+            print(f'rendering subtitle video -> {video_output_path}')
+            render_subtitle_video(
+                video_path=args.video_path,
+                output_path=str(video_output_path),
+                fps=args.fps,
+                round_records=round_records,
+                font_path=args.subtitle_font_path,
+                max_lines=args.subtitle_max_lines,
+                extend_last_subtitle=not args.stop_on_response,
+            )
     finally:
         if jsonl_handle is not None:
             jsonl_handle.close()

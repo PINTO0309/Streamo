@@ -50,7 +50,8 @@ python examples/infer/streaming_action_caption_demo.py \
 --video-path demo/cook.mp4 \
 --mode caption \
 --realtime false \
---save-jsonl output/stream_demo.jsonl
+--save-jsonl output/stream_demo.jsonl \
+--save-video output/stream_demo.mp4
 ```
 
 adapter の例:
@@ -65,7 +66,7 @@ python examples/infer/streaming_action_caption_demo.py \
 --realtime false
 ```
 
-このスクリプトは各 round を `<Xs-Ys>` とモデル出力で逐次表示し、新しい `</Response>` だけを event log として別表示します。必要なら 1 round 1 record の JSONL も保存できます。
+このスクリプトは各 round を `<Xs-Ys>` とモデル出力で逐次表示し、新しい `</Response>` だけを event log として別表示します。必要なら 1 round 1 record の JSONL を保存でき、`--save-video` を指定すれば字幕焼き込み済みの MP4 も出力できます。
 
 ## Data Preparation📊
 

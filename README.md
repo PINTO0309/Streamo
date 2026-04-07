@@ -55,7 +55,8 @@ python examples/infer/streaming_action_caption_demo.py \
 --video-path demo/cook.mp4 \
 --mode caption \
 --realtime false \
---save-jsonl output/stream_demo.jsonl
+--save-jsonl output/stream_demo.jsonl \
+--save-video output/stream_demo.mp4
 ```
 
 Adapter example:
@@ -70,7 +71,7 @@ python examples/infer/streaming_action_caption_demo.py \
 --realtime false
 ```
 
-The script prints each round as `<Xs-Ys>` plus the model output, emits a separate event log only for new `</Response>` turns, and can optionally persist one JSONL record per round.
+The script prints each round as `<Xs-Ys>` plus the model output, emits a separate event log only for new `</Response>` turns, can optionally persist one JSONL record per round, and can render a subtitle-burned MP4 via `--save-video`.
 
 ## Data Preparation📊
 
