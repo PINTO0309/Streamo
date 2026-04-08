@@ -273,23 +273,28 @@ if __name__ == '__main__':
     infer_backend = 'vllm'
     model = 'output/v0-20260402-015200/checkpoint-630' # e.g. output/v0-20260402-015200/checkpoint-630
 
-    if infer_backend == 'pt':
-        engine = PtEngine(model, max_batch_size=64)
-    elif infer_backend == 'vllm':
-        from swift.llm import VllmEngine
-        engine = VllmEngine(model, max_model_len=32768, limit_mm_per_prompt={'image': 500}, tensor_parallel_size=1, enable_prefix_caching=True)
-
     video_path = './demo/cook.mp4'
-
     target_fps = 1.0
-    video_extractor = VideoFrameExtractor(video_path, target_fps=target_fps)
 
     # question = 'What is being added to the bowl?'
     question = 'Detect and summarize each event sequence in the video.'
     global_question = True
     system = SYSTEM
     question_time = 0
-    max_rounds = 300
+    max_rounds = 120
+
+    if infer_backend == 'pt':
+        engine = PtEngine(model, max_batch_size=64)
+    elif infer_backend == 'vllm':
+        from swift.llm import VllmEngine
+        engine = VllmEngine(
+            model,
+            max_model_len=32768,
+            limit_mm_per_prompt={'image': max(max_rounds, 16)},
+            tensor_parallel_size=1,
+            enable_prefix_caching=True)
+
+    video_extractor = VideoFrameExtractor(video_path, target_fps=target_fps)
 
     # Get total number of rounds
     round_num = video_extractor.get_total_rounds()
