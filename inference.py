@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
@@ -43,6 +44,7 @@ STATE_STANDBY = '</Standby>'
 STATE_RESPONSE = '</Response>'
 RESPONSE_PREFIXES = (STATE_RESPONSE, STATE_STANDBY, STATE_SILENCE)
 DEFAULT_SUBTITLE_MAX_LINES = 4
+DEFAULT_QUESTION = 'Detect and summarize each event sequence in the video.'
 SUBTITLE_FONT_CANDIDATES = (
     '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
     '/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc',
@@ -288,6 +290,15 @@ def parse_response(response: str) -> Tuple[str, str]:
     return 'other', response
 
 
+def str2bool(value: str) -> bool:
+    value = value.strip().lower()
+    if value in {'1', 'true', 'yes', 'y', 'on'}:
+        return True
+    if value in {'0', 'false', 'no', 'n', 'off'}:
+        return False
+    raise argparse.ArgumentTypeError(f'Invalid boolean value: {value}')
+
+
 def build_subtitle_text(response_type: str, response_body: str) -> str:
     if response_type != STATE_RESPONSE:
         return ''
@@ -501,27 +512,59 @@ def render_subtitle_video(
         writer.release()
 
 
-if __name__ == '__main__':
+def parse_args():
+    parser = argparse.ArgumentParser(description='Streaming inference demo for Streamo checkpoints.')
+    parser.add_argument('--backend', choices=['pt', 'vllm'], default='vllm', help='Inference backend.')
+    parser.add_argument('--model-path', default='output/v0-20260402-015200/checkpoint-630', help='Full checkpoint / merged model path.')
+    parser.add_argument('--video-path', default='./demo/cook.mp4', help='Input video path.')
+    parser.add_argument('--fps', type=float, default=1.0, help='Sampling FPS for streaming inference.')
+    parser.add_argument('--save-video', default='./output/cook_output.mp4', help='Output video path with rendered subtitles.')
+    parser.add_argument('--subtitle-font-path', default=None, help='Optional font path for subtitle rendering.')
+    parser.add_argument('--subtitle-max-lines', type=int, default=DEFAULT_SUBTITLE_MAX_LINES, help='Maximum subtitle lines rendered into --save-video.')
+    parser.add_argument('--question', default=DEFAULT_QUESTION, help='Question text for the streaming prompt.')
+    parser.add_argument('--global-question', type=str2bool, default=True, help='Re-inject the question into the first visible user turn after truncation.')
+    parser.add_argument('--system-prompt', default=SYSTEM, help='System prompt text.')
+    parser.add_argument('--question-time', type=int, default=0, help='Round index at which the question becomes active.')
+    parser.add_argument('--window-size', type=int, default=32, help='Maximum rounds kept in the sliding window.')
+    args = parser.parse_args()
+    if args.fps <= 0:
+        parser.error('--fps must be > 0.')
+    if args.subtitle_max_lines <= 0:
+        parser.error('--subtitle-max-lines must be > 0.')
+    if args.window_size <= 0:
+        parser.error('--window-size must be > 0.')
+    if args.question_time < 0:
+        parser.error('--question-time must be >= 0.')
+    return args
+
+
+def main():
     from swift.llm import InferRequest, PtEngine
     import json
 
-    infer_backend = 'vllm'
-    model = 'output/v0-20260402-015200/checkpoint-630' # e.g. output/v0-20260402-015200/checkpoint-630
+    args = parse_args()
 
-    video_path = './demo/cook.mp4'
-    target_fps = 1.0
-    save_video_path = './output/cook_output.mp4'
-    subtitle_font_path = None
-    subtitle_max_lines = DEFAULT_SUBTITLE_MAX_LINES
-
-    # question = 'What is being added to the bowl?'
-    question = 'Detect and summarize each event sequence in the video.'
-    global_question = True
-    system = SYSTEM
-    question_time = 0
+    infer_backend = args.backend
+    model = args.model_path
+    video_path = args.video_path
+    target_fps = args.fps
+    save_video_path = args.save_video
+    subtitle_font_path = args.subtitle_font_path
+    subtitle_max_lines = args.subtitle_max_lines
+    question = args.question
+    global_question = args.global_question
+    system = args.system_prompt
+    question_time = args.question_time
     # vLLM hits the 32k context limit quickly with per-round image inputs.
     # Keep the sliding window conservative so truncation happens before add_request fails.
-    max_rounds = 32
+    max_rounds = args.window_size
+
+    print(f'backend: {infer_backend}')
+    print(f'model: {model}')
+    print(f'video_path: {video_path}')
+    print(f'save_video: {save_video_path}')
+    print(f'question: {question}')
+    print(f'window_size: {max_rounds}')
 
     if infer_backend == 'pt':
         engine = PtEngine(model, max_batch_size=64)
@@ -614,3 +657,7 @@ if __name__ == '__main__':
             max_lines=subtitle_max_lines,
         )
         print(f"Saved subtitle video: {video_output_path}")
+
+
+if __name__ == '__main__':
+    main()
