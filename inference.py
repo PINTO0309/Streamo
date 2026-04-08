@@ -281,7 +281,9 @@ if __name__ == '__main__':
     global_question = True
     system = SYSTEM
     question_time = 0
-    max_rounds = 120
+    # vLLM hits the 32k context limit quickly with per-round image inputs.
+    # Keep the sliding window conservative so truncation happens before add_request fails.
+    max_rounds = 32
 
     if infer_backend == 'pt':
         engine = PtEngine(model, max_batch_size=64)
