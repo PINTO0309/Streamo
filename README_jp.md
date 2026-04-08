@@ -68,6 +68,51 @@ python examples/infer/streaming_action_caption_demo.py \
 
 このスクリプトは各 round を `<Xs-Ys>` とモデル出力で逐次表示し、新しい `</Response>` だけを event log として別表示します。必要なら 1 round 1 record の JSONL を保存でき、`--save-video` を指定すれば字幕焼き込み済みの MP4 も出力できます。
 
+### `inference.py` の使い方
+
+`examples/infer/streaming_action_caption_demo.py` はストリーミング推論用の推奨 CLI デモです。`inference.py` は、それより単純にファイルを直接編集して実行したい場合のサンプルスクリプトです。
+
+このスクリプトは CLI 引数を受け取りません。Installation 節の依存関係が入っている前提で動作し、既定の入力動画として `demo/cook.mp4` を使います。また、このリポジトリではモデル重みを公開していないため、`MODEL_PATH` は各自のローカルモデルパスへ置き換える必要があります。
+
+実行前に `inference.py` の `__main__` 内で次の値を編集してください。
+
+- `infer_backend`: `PtEngine` を使う `pt` か、`VllmEngine` を使う `vllm` を選びます。
+- `model`: `MODEL_PATH` のままでは動かないので、ローカルの checkpoint または merged model のパスに変更します。
+- `video_path`: 入力動画を指定します。既定例は `./demo/cook.mp4` です。
+- `target_fps`: 1 秒あたり何枚のフレームを使うかを指定します。`1.0` は 1 秒ごとに 1 フレームです。
+- `question`: タスクのプロンプトを指定します。たとえば `Detect and summarize each event sequence in the video.` や `What is being added to the bowl?` を使えます。
+- `global_question`: `True` にすると、スライディングウィンドウで履歴が切り詰められた後も、先頭の user turn に質問を残します。
+- `question_time`: 質問を最初に注入する round を指定します。`0` なら最初の round から質問を入れます。
+- `max_rounds`: 長尺動画で保持する直近 round 数の上限です。
+
+リポジトリルートで次を実行します。
+
+```bash
+python inference.py
+```
+
+backend ごとの差分:
+
+- `pt` は `PtEngine(model, max_batch_size=64)` を生成します。
+- `vllm` は `VllmEngine(model, max_model_len=32768, limit_mm_per_prompt={'image': 500}, tensor_parallel_size=1, enable_prefix_caching=True)` を生成します。
+- 現状の `inference.py` では `pt` と `vllm` のみをサポートしています。
+- `vllm` 使用時は `max_model_len` と `limit_mm_per_prompt` が、長尺動画でどこまで文脈を保持できるかに影響します。
+
+出力の見方:
+
+- `Total rounds: N` は、選択した動画と FPS に対して何個の 1 秒 round を処理するかを示します。
+- `=====Round i=====` と `Answer: ...` は各 round の推論結果です。
+- `</Silence>` は、関連イベントがまだ始まっていないか、その frame が質問に無関係であることを表します。
+- `</Standby>` は、イベントが進行中であり、まだ最終回答を出す段階ではないことを表します。
+- `</Response>` は、イベントが完了したか、完全回答に十分な情報が揃ったことを表します。
+- 実行後は `./test_sample_video.jsonl` に 1 行追記され、`video_path`、`target_fps`、round ごとの出力が保存されます。
+
+運用上の注意:
+
+- このスクリプトは実験用の編集前提サンプルであり、完成された CLI ではありません。利用前にファイルを編集する前提です。
+- `test_sample_video.jsonl` は append モードで開かれるため、繰り返し実行すると同じファイルに結果が蓄積されます。
+- キャプション用途から QA 用途へ切り替える場合、通常は `question`、`question_time`、必要に応じて `global_question` を変更すれば十分です。
+
 ## Data Preparation📊
 
 ### Data Pipeline Overview

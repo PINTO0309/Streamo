@@ -73,6 +73,51 @@ python examples/infer/streaming_action_caption_demo.py \
 
 The script prints each round as `<Xs-Ys>` plus the model output, emits a separate event log only for new `</Response>` turns, can optionally persist one JSONL record per round, and can render a subtitle-burned MP4 via `--save-video`.
 
+### Using `inference.py`
+
+`examples/infer/streaming_action_caption_demo.py` is the recommended CLI demo for streaming inference. Use `inference.py` when you want a simpler script that you edit directly in place before running.
+
+This script does not expose CLI arguments. It assumes the dependencies from the Installation section are already available, uses `demo/cook.mp4` as the default input video, and requires you to replace `MODEL_PATH` with your own local model path because the model weights are not publicly released in this repository.
+
+Before running, open `inference.py` and update these values in `__main__`:
+
+- `infer_backend`: choose `pt` for `PtEngine` or `vllm` for `VllmEngine`.
+- `model`: set your local checkpoint or merged model path instead of `MODEL_PATH`.
+- `video_path`: set the input video. The default example is `./demo/cook.mp4`.
+- `target_fps`: controls how many frames are sampled per second. `1.0` means one frame per second.
+- `question`: set the task prompt. For example, `Detect and summarize each event sequence in the video.` or `What is being added to the bowl?`
+- `global_question`: when `True`, the question is kept in the first visible user turn even after sliding-window truncation.
+- `question_time`: controls when the question first appears. `0` means the question is injected from the first round.
+- `max_rounds`: limits how many recent rounds remain in memory for long videos.
+
+Run the script from the repository root:
+
+```bash
+python inference.py
+```
+
+Backend notes:
+
+- `pt` creates `PtEngine(model, max_batch_size=64)`.
+- `vllm` creates `VllmEngine(model, max_model_len=32768, limit_mm_per_prompt={'image': 500}, tensor_parallel_size=1, enable_prefix_caching=True)`.
+- In the current implementation, `pt` and `vllm` are the only supported options in `inference.py`.
+- When using `vllm`, `max_model_len` and `limit_mm_per_prompt` directly affect how much long-video context can be retained.
+
+How to read the output:
+
+- `Total rounds: N` shows how many 1-second rounds will be processed for the selected video and FPS.
+- `=====Round i=====` and `Answer: ...` show the model output for each round.
+- `</Silence>` means no relevant event has started yet, or the current frame is irrelevant.
+- `</Standby>` means the event is still unfolding and the script should wait before giving a final answer.
+- `</Response>` means the event is complete, or the model now has enough information to answer fully.
+- After the run, one JSON line is appended to `./test_sample_video.jsonl` with `video_path`, `target_fps`, and the per-round outputs.
+
+Practical notes:
+
+- The script is intended as an editable example, not a polished CLI. Expect to modify the file before each experiment.
+- `test_sample_video.jsonl` is opened in append mode, so repeated runs accumulate records in the same file.
+- If you switch from caption-style prompting to QA-style prompting, usually only `question`, `question_time`, and optionally `global_question` need to change.
+
 ## Data Preparation📊
 
 ### Data Pipeline Overview
