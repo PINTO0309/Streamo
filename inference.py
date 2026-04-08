@@ -510,7 +510,7 @@ if __name__ == '__main__':
 
     video_path = './demo/cook.mp4'
     target_fps = 1.0
-    save_video_path = None
+    save_video_path = './output/cook_output.mp4'
     subtitle_font_path = None
     subtitle_max_lines = DEFAULT_SUBTITLE_MAX_LINES
 
