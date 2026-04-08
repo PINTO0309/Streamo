@@ -55,7 +55,7 @@ dependencies = [
   "uvicorn==0.40.0",
   "zstandard==0.25.0",
   "opencv-python-headless==4.13.0.92",
-  "vllm==0.10.1.1",
+  "vllm==0.19.0",
 ]
 
 [project.scripts]
@@ -76,3 +76,8 @@ flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/down
 index-url = "https://pypi.org/simple"
 extra-index-url = ["https://download.pytorch.org/whl/cu128"]
 index-strategy = "unsafe-best-match"
+override-dependencies = [
+  "torch==2.7.1+cu128",
+  "torchvision==0.22.1+cu128",
+  "torchaudio==2.7.1+cu128",
+]
