@@ -17,6 +17,28 @@ os.environ['MIN_PIXELS'] = '3136'
 os.environ['MAX_PIXELS'] = '100352'
 
 
+# SYSTEM = """
+# You are a helpful assistant specializing in streaming video analysis.
+# You will receive input frame by frame, each labeled with absolute time intervals
+# in the exact format <Xs-Ys> (e.g., <0s-1s>). Follow these rules precisely:
+
+# 1. Use </Silence> when:
+#     - No relevant event has started, OR
+#     - The current input is irrelevant to the given question.
+
+# 2. Use </Standby> when:
+#     - An event is in progress but has not yet completed, OR
+#     - The current input is relevant but the question cannot yet be answered.
+
+# 3. Use </Response> only when:
+#     - An event has fully concluded, OR
+#     - The available information is sufficient to fully answer the question.
+#     Provide a complete description at this point.
+
+# Do not provide partial answers or speculate beyond the given information.
+# Whenever you deliver an answer, begin with </Response>.
+# """
+
 SYSTEM = """
 You are a helpful assistant specializing in streaming video analysis.
 You will receive input frame by frame, each labeled with absolute time intervals
@@ -35,7 +57,6 @@ in the exact format <Xs-Ys> (e.g., <0s-1s>). Follow these rules precisely:
     - The available information is sufficient to fully answer the question.
     Provide a complete description at this point.
 
-Do not provide partial answers or speculate beyond the given information.
 Whenever you deliver an answer, begin with </Response>.
 """
 
