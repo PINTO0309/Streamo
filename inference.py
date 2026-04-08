@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, List
+from pathlib import Path
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
+
 import cv2
-from PIL import Image
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 if TYPE_CHECKING:
     from swift.llm import InferEngine, InferRequest
@@ -34,6 +37,19 @@ in the exact format <Xs-Ys> (e.g., <0s-1s>). Follow these rules precisely:
 Do not provide partial answers or speculate beyond the given information.
 Whenever you deliver an answer, begin with </Response>.
 """
+
+STATE_SILENCE = '</Silence>'
+STATE_STANDBY = '</Standby>'
+STATE_RESPONSE = '</Response>'
+RESPONSE_PREFIXES = (STATE_RESPONSE, STATE_STANDBY, STATE_SILENCE)
+DEFAULT_SUBTITLE_MAX_LINES = 4
+SUBTITLE_FONT_CANDIDATES = (
+    '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+    '/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc',
+    '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+    '/usr/share/fonts/truetype/noto/NotoSerifCJK-Regular.ttc',
+    '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+)
 
 
 class VideoFrameExtractor:
@@ -265,9 +281,228 @@ def get_data_stream_video_window(
         return data
 
 
+def parse_response(response: str) -> Tuple[str, str]:
+    for prefix in RESPONSE_PREFIXES:
+        if response.startswith(prefix):
+            return prefix, response[len(prefix):].lstrip()
+    return 'other', response
+
+
+def build_subtitle_text(response_type: str, response_body: str) -> str:
+    if response_type != STATE_RESPONSE:
+        return ''
+    subtitle_text = response_body.strip()
+    return subtitle_text or STATE_RESPONSE
+
+
+def ensure_parent_dir(path: Optional[str]) -> Optional[Path]:
+    if not path:
+        return None
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    return output_path
+
+
+def load_subtitle_font(font_path: Optional[str], font_size: int):
+    candidates: List[str] = []
+    if font_path:
+        candidates.append(font_path)
+    candidates.extend(SUBTITLE_FONT_CANDIDATES)
+    for candidate in candidates:
+        if not candidate or not Path(candidate).exists():
+            continue
+        try:
+            return ImageFont.truetype(candidate, font_size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def text_width(draw: ImageDraw.ImageDraw, text: str, font) -> int:
+    if not text:
+        return 0
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0]
+
+
+def fit_text_with_ellipsis(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> str:
+    if text_width(draw, text, font) <= max_width:
+        return text
+    ellipsis = '...'
+    trimmed = text.rstrip()
+    while trimmed and text_width(draw, f'{trimmed}{ellipsis}', font) > max_width:
+        trimmed = trimmed[:-1].rstrip()
+    return f'{trimmed}{ellipsis}' if trimmed else ellipsis
+
+
+def wrap_subtitle_text(
+    *,
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font,
+    max_width: int,
+    max_lines: int,
+) -> List[str]:
+    if not text:
+        return []
+    lines: List[str] = []
+    paragraphs = text.splitlines() or ['']
+    for paragraph_idx, paragraph in enumerate(paragraphs):
+        current = ''
+        for char in paragraph:
+            candidate = current + char
+            if current and text_width(draw, candidate, font) > max_width:
+                lines.append(current.rstrip())
+                if len(lines) >= max_lines:
+                    lines[-1] = fit_text_with_ellipsis(draw, lines[-1], font, max_width)
+                    return lines
+                current = char.lstrip() if char.isspace() else char
+            else:
+                current = candidate
+        if current or not paragraph:
+            lines.append(current.rstrip())
+            if len(lines) >= max_lines:
+                has_remaining = paragraph_idx < len(paragraphs) - 1
+                if has_remaining:
+                    lines[-1] = fit_text_with_ellipsis(draw, lines[-1], font, max_width)
+                return lines
+    return [line for line in lines if line]
+
+
+def draw_subtitle_on_frame(
+    frame: np.ndarray,
+    subtitle_text: str,
+    *,
+    font_path: Optional[str],
+    max_lines: int,
+) -> np.ndarray:
+    if not subtitle_text:
+        return frame
+
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    image = Image.fromarray(frame_rgb).convert('RGBA')
+    overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    width, height = image.size
+    horizontal_margin = max(24, width // 18)
+    vertical_margin = max(20, height // 20)
+    font_size = max(18, height // 20)
+    font = load_subtitle_font(font_path, font_size)
+    lines = wrap_subtitle_text(
+        draw=draw,
+        text=subtitle_text,
+        font=font,
+        max_width=width - (horizontal_margin * 2),
+        max_lines=max_lines,
+    )
+    if not lines:
+        return frame
+
+    line_spacing = max(6, font_size // 4)
+    line_heights: List[int] = []
+    line_widths: List[int] = []
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_widths.append(bbox[2] - bbox[0])
+        line_heights.append(bbox[3] - bbox[1])
+
+    padding_x = max(16, width // 40)
+    padding_y = max(12, height // 45)
+    text_block_height = sum(line_heights) + line_spacing * max(0, len(lines) - 1)
+    box_height = text_block_height + padding_y * 2
+    box_top = max(0, height - vertical_margin - box_height)
+    box_bottom = min(height, height - vertical_margin)
+    draw.rounded_rectangle(
+        [horizontal_margin, box_top, width - horizontal_margin, box_bottom],
+        radius=max(10, min(width, height) // 60),
+        fill=(0, 0, 0, 176),
+    )
+
+    y = box_top + padding_y
+    stroke_width = max(1, font_size // 18)
+    for line, line_width, line_height in zip(lines, line_widths, line_heights):
+        x = (width - line_width) / 2
+        draw.text(
+            (x, y),
+            line,
+            font=font,
+            fill=(255, 255, 255, 255),
+            stroke_width=stroke_width,
+            stroke_fill=(0, 0, 0, 255),
+        )
+        y += line_height + line_spacing
+
+    composed = Image.alpha_composite(image, overlay).convert('RGB')
+    return cv2.cvtColor(np.array(composed), cv2.COLOR_RGB2BGR)
+
+
+def video_fourcc_for_path(path: str) -> int:
+    suffix = Path(path).suffix.lower()
+    return cv2.VideoWriter_fourcc(*('mp4v' if suffix == '.mp4' else 'MJPG'))
+
+
+def subtitle_for_time(*, time_sec: float, fps: float, round_records: Sequence[Dict]) -> str:
+    if not round_records:
+        return ''
+    if time_sec >= round_records[-1]['end_sec']:
+        return ''
+    round_idx = min(max(int(time_sec * fps), 0), len(round_records) - 1)
+    return round_records[round_idx].get('subtitle_text', '')
+
+
+def render_subtitle_video(
+    *,
+    video_path: str,
+    output_path: str,
+    fps: float,
+    round_records: Sequence[Dict],
+    font_path: Optional[str],
+    max_lines: int,
+) -> None:
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f'Cannot open video for subtitle rendering: {video_path}')
+
+    original_fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if original_fps <= 0:
+        cap.release()
+        raise ValueError(f'Invalid FPS for video: {video_path}')
+
+    writer = cv2.VideoWriter(output_path, video_fourcc_for_path(output_path), original_fps, (width, height))
+    if not writer.isOpened():
+        cap.release()
+        raise ValueError(f'Cannot open video writer: {output_path}')
+
+    try:
+        frame_idx = 0
+        while True:
+            success, frame = cap.read()
+            if not success:
+                break
+            subtitle_text = subtitle_for_time(
+                time_sec=frame_idx / original_fps,
+                fps=fps,
+                round_records=round_records,
+            )
+            if subtitle_text:
+                frame = draw_subtitle_on_frame(
+                    frame,
+                    subtitle_text,
+                    font_path=font_path,
+                    max_lines=max_lines,
+                )
+            writer.write(frame)
+            frame_idx += 1
+    finally:
+        cap.release()
+        writer.release()
+
+
 if __name__ == '__main__':
-    from swift.llm import InferRequest, PtEngine, RequestConfig
-    from swift.plugin import InferStats
+    from swift.llm import InferRequest, PtEngine
     import json
 
     infer_backend = 'vllm'
@@ -275,6 +510,9 @@ if __name__ == '__main__':
 
     video_path = './demo/cook.mp4'
     target_fps = 1.0
+    save_video_path = None
+    subtitle_font_path = None
+    subtitle_max_lines = DEFAULT_SUBTITLE_MAX_LINES
 
     # question = 'What is being added to the bowl?'
     question = 'Detect and summarize each event sequence in the video.'
@@ -301,8 +539,10 @@ if __name__ == '__main__':
     # Get total number of rounds
     round_num = video_extractor.get_total_rounds()
     print(f"Total rounds: {round_num}")
+    print(f"Save subtitle video: {save_video_path or 'disabled'}")
 
     output = {}
+    round_records: List[Dict] = []
     data = None
 
     for i in range(round_num):
@@ -330,12 +570,22 @@ if __name__ == '__main__':
             )
 
         if i < question_time:
-            answer = "</Silence>"
+            answer = STATE_SILENCE
         else:
             infer_request = InferRequest(**data)
             answer = infer_single(engine, infer_request)
 
         output[f"Round {i}"] = answer
+        response_type, response_body = parse_response(answer)
+        round_records.append({
+            'round': i,
+            'start_sec': i,
+            'end_sec': i + 1,
+            'response': answer,
+            'response_type': response_type,
+            'response_body': response_body,
+            'subtitle_text': build_subtitle_text(response_type, response_body),
+        })
         print("=====Round", i, "=====")
         print(f"Answer: {answer}")
 
@@ -349,3 +599,18 @@ if __name__ == '__main__':
             "output": output
         }
         f.write(json.dumps(result) + '\n')
+
+    video_output_path = ensure_parent_dir(save_video_path)
+    if video_output_path is not None:
+        if subtitle_max_lines <= 0:
+            raise ValueError('subtitle_max_lines must be > 0')
+        print(f"Rendering subtitle video to {video_output_path}")
+        render_subtitle_video(
+            video_path=video_path,
+            output_path=str(video_output_path),
+            fps=target_fps,
+            round_records=round_records,
+            font_path=subtitle_font_path,
+            max_lines=subtitle_max_lines,
+        )
+        print(f"Saved subtitle video: {video_output_path}")
