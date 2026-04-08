@@ -4,3 +4,4 @@ swift/__pycache__/
 swift/*/__pycache__/
 dataset/Streamo-Instruct-465K/
 dataset/stream/*.json
+*.egg-info
