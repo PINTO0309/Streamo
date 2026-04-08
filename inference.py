@@ -271,7 +271,7 @@ if __name__ == '__main__':
     import json
 
     infer_backend = 'vllm'
-    model = 'MODEL_PATH'
+    model = 'output/v0-20260402-015200/checkpoint-630' # e.g. output/v0-20260402-015200/checkpoint-630
 
     if infer_backend == 'pt':
         engine = PtEngine(model, max_batch_size=64)
