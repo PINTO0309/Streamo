@@ -8,3 +8,4 @@ dataset/stream/*.json
 labels/
 samples/
 stream/
+*.tar.gz
