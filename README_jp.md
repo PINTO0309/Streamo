@@ -270,7 +270,7 @@ python scripts/prepare_streamo_training_data.py \
 
 python scripts/prepare_streamo_training_data.py \
 --label-root /home/lm/git/Streamo/dataset/labels \
---media-root /home/lm/git/Streamo/dataset/samples \
+--media-root /home/lm/git/Streamo/dataset \
 --output-raw ./dataset/stream/raw_resolved.json \
 --output-stream ./dataset/stream/stream_format.json \
 --report-json ./dataset/stream/prepare_report.json \
