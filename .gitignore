@@ -10,3 +10,4 @@ samples/
 frames/
 *.tar.gz
 output/
+demo/*.mp4
