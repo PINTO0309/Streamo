@@ -1,6 +1,6 @@
 export MIN_PIXELS=3136
 export MAX_PIXELS=100352
-export MAX_CONTEXT_LENGTH=65536
+export MAX_CONTEXT_LENGTH=65536 # Default: 32768
 export USE_HF=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce memory fragmentation
 # sudo chown -R $(whoami) /mnt/data/downloads/
