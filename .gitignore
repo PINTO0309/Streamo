@@ -7,3 +7,4 @@ dataset/stream/*.json
 *.egg-info
 labels/
 samples/
+stream/
