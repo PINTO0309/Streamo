@@ -7,4 +7,5 @@ dataset/stream/*.json
 *.egg-info
 labels/
 samples/
+frames/
 *.tar.gz
