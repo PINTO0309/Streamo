@@ -48,6 +48,7 @@ KNOWN_SOURCES = {
     'how_to_step',
     'queryd',
     'tacos',
+    'custom',
 }
 
 # Mapping from source name to archive_id(s) in the SQLite index.
