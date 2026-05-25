@@ -210,6 +210,45 @@ class TestPrepareStreamoTrainingData(unittest.TestCase):
             self.assertEqual(report_from_disk['drop_reasons']['missing_file'], 1)
             self.assertEqual(report_from_disk['drop_reasons']['unsupported_source'], 1)
 
+    def test_prepare_fails_fast_when_label_root_missing(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            args = self.module.parse_args([
+                '--label-root', str(tmp_path / 'missing_labels'),
+                '--media-root', str(tmp_path),
+            ])
+
+            with self.assertRaisesRegex(FileNotFoundError, 'Label root does not exist'):
+                self.module.prepare_streamo_training_data(args)
+
+    def test_prepare_fails_fast_when_media_root_missing_in_local_mode(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            label_root = tmp_path / 'labels'
+            label_root.mkdir()
+            args = self.module.parse_args([
+                '--label-root', str(label_root),
+                '--media-root', str(tmp_path / 'missing_media'),
+            ])
+
+            with self.assertRaisesRegex(FileNotFoundError, 'Media root does not exist'):
+                self.module.prepare_streamo_training_data(args)
+
+    def test_prepare_fails_fast_when_no_label_json_files(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            label_root = tmp_path / 'labels'
+            media_root = tmp_path / 'media'
+            label_root.mkdir()
+            media_root.mkdir()
+            args = self.module.parse_args([
+                '--label-root', str(label_root),
+                '--media-root', str(media_root),
+            ])
+
+            with self.assertRaisesRegex(RuntimeError, 'No label JSON files found'):
+                self.module.prepare_streamo_training_data(args)
+
     def test_streaming_dataset_plugin_uses_env_vars(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)

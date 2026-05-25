@@ -176,6 +176,25 @@ def iter_label_files(label_root: Path) -> List[Path]:
     return sorted(path for path in label_root.rglob('*.json') if path.is_file())
 
 
+def validate_input_paths(label_root: Path, media_root: Path, archive_index_path: Optional[Path]) -> None:
+    if not label_root.exists():
+        raise FileNotFoundError(f'Label root does not exist: {label_root}')
+    if not label_root.is_dir():
+        raise NotADirectoryError(f'Label root is not a directory: {label_root}')
+
+    if archive_index_path is not None:
+        if not archive_index_path.exists():
+            raise FileNotFoundError(f'Archive index does not exist: {archive_index_path}')
+        if not archive_index_path.is_file():
+            raise FileNotFoundError(f'Archive index is not a file: {archive_index_path}')
+        return
+
+    if not media_root.exists():
+        raise FileNotFoundError(f'Media root does not exist: {media_root}')
+    if not media_root.is_dir():
+        raise NotADirectoryError(f'Media root is not a directory: {media_root}')
+
+
 def iter_index_roots(media_root: Path) -> List[Path]:
     candidates = [
         media_root / 'coin' / 'videos',
@@ -375,7 +394,10 @@ def prepare_streamo_training_data(args: argparse.Namespace) -> Dict[str, Any]:
     include_sources = normalize_filter(args.include_sources)
     exclude_sources = normalize_filter(args.exclude_sources)
 
+    validate_input_paths(label_root, media_root, archive_index_path)
     label_files = iter_label_files(label_root)
+    if not label_files:
+        raise RuntimeError(f'No label JSON files found under label root: {label_root}')
 
     # Build the appropriate lookup depending on mode
     archive_lookup: Optional[ArchiveLookup] = None
