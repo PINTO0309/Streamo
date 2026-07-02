@@ -5,9 +5,10 @@ swift/*/__pycache__/
 dataset/Streamo-Instruct-465K/
 dataset/stream/*.json
 *.egg-info
-labels/
-samples/
+labels*/
+samples*/
 frames/
 *.tar.gz
 output/
 demo/*.mp4
+stream_bk/
