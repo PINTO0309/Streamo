@@ -285,6 +285,16 @@ python scripts/prepare_streamo_training_data.py \
 --report-json ./dataset/stream/prepare_report.json \
 --fps 1.0 \
 --num-workers 8
+
+# 1.0 FPS -> 15.0 FPS
+python scripts/prepare_streamo_training_data.py \
+--label-root ./dataset/labels \
+--media-root ./dataset \
+--output-raw ./dataset/stream/raw_resolved.json \
+--output-stream ./dataset/stream/stream_format.json \
+--report-json ./dataset/stream/prepare_report.json \
+--fps 15.0 \
+--num-workers 8
 ```
 
 | ソース            | ラベルあり | 動画あり |
