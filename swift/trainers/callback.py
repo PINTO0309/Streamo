@@ -6,6 +6,7 @@ import time
 import torch
 from tqdm import tqdm
 from transformers import trainer
+from transformers.trainer import PREFIX_CHECKPOINT_DIR
 from transformers.trainer_callback import (DefaultFlowCallback, PrinterCallback, ProgressCallback, TrainerControl,
                                            TrainerState)
 from transformers.trainer_utils import IntervalStrategy, has_length
@@ -70,27 +71,36 @@ class ProgressCallbackNew(ProgressCallback):
 
 class DefaultFlowCallbackNew(DefaultFlowCallback):
 
+    @staticmethod
+    def _last_checkpoint_was_saved(args: TrainingArguments, state: TrainerState) -> bool:
+        checkpoint_dir = os.path.join(args.output_dir, f'{PREFIX_CHECKPOINT_DIR}-{state.global_step}')
+        return getattr(state, 'last_model_checkpoint', None) == checkpoint_dir and os.path.isdir(checkpoint_dir)
+
+    @staticmethod
+    def _set_save_and_evaluate(args: TrainingArguments, state: TrainerState, control: TrainerControl) -> None:
+        evaluation_strategy = args.eval_strategy if hasattr(args, 'eval_strategy') else args.evaluation_strategy
+        if evaluation_strategy != IntervalStrategy.NO:
+            control.should_evaluate = True
+        if (args.save_strategy != IntervalStrategy.NO
+                and not DefaultFlowCallbackNew._last_checkpoint_was_saved(args, state)):
+            control.should_save = True
+
     def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         control = super().on_step_end(args, state, control, **kwargs)
         # save the last ckpt
-        evaluation_strategy = args.eval_strategy if hasattr(args, 'eval_strategy') else args.evaluation_strategy
         if state.global_step == state.max_steps:
-            if evaluation_strategy != IntervalStrategy.NO:
-                control.should_evaluate = True
-            if args.save_strategy != IntervalStrategy.NO:
-                control.should_save = True
+            self._set_save_and_evaluate(args, state, control)
         return control
 
     def on_epoch_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         control = super().on_epoch_end(args, state, control, **kwargs)
-        evaluation_strategy = args.eval_strategy if hasattr(args, 'eval_strategy') else args.evaluation_strategy
         if args.max_epochs is not None and args.max_epochs <= math.ceil(state.epoch):
             logger.info('Training has reached `max_epochs`. The model will be saved and the training will be exited.')
-            if evaluation_strategy != IntervalStrategy.NO:
-                control.should_evaluate = True
-            if args.save_strategy != IntervalStrategy.NO:
-                control.should_save = True
+            self._set_save_and_evaluate(args, state, control)
             control.should_training_stop = True
+        elif control.should_training_stop and state.global_step > 0:
+            logger.info('Training is stopping before `max_steps`. The model will be saved.')
+            self._set_save_and_evaluate(args, state, control)
         return control
 
 
