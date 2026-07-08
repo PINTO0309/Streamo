@@ -7,6 +7,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce memory fragmen
 # mkdir -p /mnt/data/downloads/stream
 export STREAM_FRAME_CACHE_DIR=/home/b920405/git/Streamo/dataset/stream/frames
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
+export STREAMING_DATASET_FPS=1.0
 
 # ### Multi-GPU
 # unset NCCL_IB_DISABLE

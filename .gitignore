@@ -11,4 +11,4 @@ frames/
 *.tar.gz
 output/
 demo/*.mp4
-stream_bk/
+stream_*/
