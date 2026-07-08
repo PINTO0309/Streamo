@@ -296,7 +296,7 @@ python scripts/prepare_streamo_training_data.py \
 --fps 12.0 \
 --num-workers 8
 
-# 1.0 FPS -> 4.0 FPS
+# 1.0 FPS -> 4.0 FPS : VRAM OOM
 python scripts/prepare_streamo_training_data.py \
 --label-root ./dataset/labels \
 --media-root ./dataset \
@@ -304,6 +304,16 @@ python scripts/prepare_streamo_training_data.py \
 --output-stream ./dataset/stream/stream_format.json \
 --report-json ./dataset/stream/prepare_report.json \
 --fps 4.0 \
+--num-workers 8
+
+# 1.0 FPS -> 3.0 FPS
+python scripts/prepare_streamo_training_data.py \
+--label-root ./dataset/labels \
+--media-root ./dataset \
+--output-raw ./dataset/stream/raw_resolved.json \
+--output-stream ./dataset/stream/stream_format.json \
+--report-json ./dataset/stream/prepare_report.json \
+--fps 3.0 \
 --num-workers 8
 ```
 
