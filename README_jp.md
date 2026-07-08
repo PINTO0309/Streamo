@@ -329,6 +329,36 @@ bash train.sh
 
 既定のワークフローでは、`swift/plugin/streaming_dataset.py` を手で編集する必要はありません。
 
+#### 任意: `--max_length` に収まる最大 FPS を探索する
+
+FPS を上げると時間方向の入力は細かくなりますが、`<stream>` / `<image>` turn 数も増えるため `--max_length` を超えやすくなります。`scripts/probe_streaming_fps.py` を使うと、学習時と同じ Qwen-VL template で候補 FPS の token 長を実測できます。
+
+簡易探索の例:
+
+```bash
+PYTHONPATH=/tmp/streamo_probe_deps:$PYTHONPATH \
+MIN_PIXELS=3136 MAX_PIXELS=100352 USE_HF=1 \
+python scripts/probe_streaming_fps.py \
+  --raw dataset/stream/raw_resolved.json \
+  --fps-candidates 1,2,3,4,5,6,8 \
+  --top-k 16 \
+  --target-max-length 32768 \
+  --output-json dataset/stream/fps_probe_report.json \
+  --write-best-stream-format dataset/stream/stream_format_best_measured.json
+```
+
+全サンプルを厳密に確認したい場合は `--top-k 0` を指定してください。全件を encode し、対象行のフレーム抽出も行うため時間は長くなります。
+
+FPS を決めたら、`train.sh` 実行前に次の 3 つを必ず揃えてください。
+
+```bash
+export STREAMING_DATASET_PATH=./dataset/stream/stream_format_best_measured.json
+export STREAMING_DATASET_FPS=4.0
+export STREAM_FRAME_CACHE_DIR=./dataset/stream/frames_fps4
+```
+
+FPS ごとに別のフレームキャッシュディレクトリを使ってください。学習時 preprocessor は抽出フレーム数と `<stream>` 数の一致を検証するため、別 FPS で作ったキャッシュを再利用するとフレーム数不一致や古いフレーム順序の原因になります。
+
 ### `to-image` Is Not Required for `train.sh`
 
 `scripts/convert_streaming_video.py` には `to-image` モードもありますが、このリポジトリの既定の学習スクリプトでは **不要** です。

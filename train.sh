@@ -5,9 +5,11 @@ export USE_HF=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce memory fragmentation
 # sudo chown -R $(whoami) /mnt/data/downloads/
 # mkdir -p /mnt/data/downloads/stream
-export STREAM_FRAME_CACHE_DIR=/home/b920405/git/Streamo/dataset/stream/frames
+# Generate this file with scripts/probe_streaming_fps.py, or override STREAMING_DATASET_PATH.
+export STREAMING_DATASET_PATH=/home/b920405/git/Streamo/dataset/stream/stream_format_best_measured.json
+export STREAM_FRAME_CACHE_DIR=/home/b920405/git/Streamo/dataset/stream/frames_fps4
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
-export STREAMING_DATASET_FPS=1.0
+export STREAMING_DATASET_FPS=4.0
 
 # ### Multi-GPU
 # unset NCCL_IB_DISABLE

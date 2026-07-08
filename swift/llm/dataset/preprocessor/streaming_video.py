@@ -615,9 +615,11 @@ class VideoFrameExtractor:
             output_dir = os.path.dirname(video_path)
         
         video_name = os.path.splitext(os.path.basename(video_path))[0]
-        frame_dir = os.path.join(output_dir, f"{video_name}_frames")
+        cache_key = self._get_cache_key(os.path.abspath(video_path))
+        cache_hash = hashlib.md5(cache_key.encode('utf-8')).hexdigest()[:12]
+        frame_dir = os.path.join(output_dir, f"{video_name}_frames_{cache_hash}")
         done_marker = os.path.join(frame_dir, ".done")
-        lock_path = os.path.join(output_dir, f".{video_name}_frames.lock")
+        lock_path = os.path.join(output_dir, f".{video_name}_frames_{cache_hash}.lock")
         
         # Check if already processed (use .done marker file) - quick check without lock
         if self.use_cache and os.path.exists(done_marker):

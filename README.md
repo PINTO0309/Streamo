@@ -285,6 +285,36 @@ bash train.sh
 
 No manual edits to `swift/plugin/streaming_dataset.py` are required for the default workflow.
 
+#### Optional: Probe the maximum FPS that fits `--max_length`
+
+Higher FPS gives the model denser temporal input, but it also increases the number of `<stream>` / `<image>` turns and can exceed `--max_length`. Use `scripts/probe_streaming_fps.py` to test candidate FPS values against the same Qwen-VL template used by training.
+
+Example quick probe:
+
+```bash
+PYTHONPATH=/tmp/streamo_probe_deps:$PYTHONPATH \
+MIN_PIXELS=3136 MAX_PIXELS=100352 USE_HF=1 \
+python scripts/probe_streaming_fps.py \
+  --raw dataset/stream/raw_resolved.json \
+  --fps-candidates 1,2,3,4,5,6,8 \
+  --top-k 16 \
+  --target-max-length 32768 \
+  --output-json dataset/stream/fps_probe_report.json \
+  --write-best-stream-format dataset/stream/stream_format_best_measured.json
+```
+
+For a full exact check, set `--top-k 0`. This encodes every surviving sample and is slower because it extracts frames for all probed rows.
+
+After choosing an FPS, keep these three values aligned before running `train.sh`:
+
+```bash
+export STREAMING_DATASET_PATH=./dataset/stream/stream_format_best_measured.json
+export STREAMING_DATASET_FPS=4.0
+export STREAM_FRAME_CACHE_DIR=./dataset/stream/frames_fps4
+```
+
+Use a different frame cache directory per FPS. The training-time preprocessor validates that the number of extracted frames matches the number of `<stream>` tokens, so reusing a cache produced with another FPS can cause mismatches or stale frame order.
+
 ### `to-image` Is Not Required for `train.sh`
 
 `scripts/convert_streaming_video.py` also provides a `to-image` mode, but that is **not** required by the default training script in this repo.
