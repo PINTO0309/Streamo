@@ -277,6 +277,10 @@ python scripts/prepare_streamo_training_data.py \
 --fps 1.0 \
 --num-workers 8
 
+####################################################
+####################################################
+####################################################
+
 python scripts/prepare_streamo_training_data.py \
 --label-root ./dataset/labels \
 --media-root ./dataset \
