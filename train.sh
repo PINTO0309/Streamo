@@ -6,7 +6,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce memory fragmen
 # sudo chown -R $(whoami) /mnt/data/downloads/
 # mkdir -p /mnt/data/downloads/stream
 # Generate this file with scripts/probe_streaming_fps.py, or override STREAMING_DATASET_PATH.
-export STREAMING_DATASET_PATH=/home/b920405/git/Streamo/dataset/stream/stream_format_best_measured.json
+export STREAMING_DATASET_PATH=/home/b920405/git/Streamo/dataset/stream/stream_format.json
 export STREAM_FRAME_CACHE_DIR=/home/b920405/git/Streamo/dataset/stream/frames
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
