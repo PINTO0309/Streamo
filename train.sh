@@ -10,7 +10,44 @@ export STREAMING_DATASET_PATH=/home/b920405/git/Streamo/dataset/stream/stream_fo
 export STREAM_FRAME_CACHE_DIR=/home/b920405/git/Streamo/dataset/stream/frames
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
-# ### Multi-GPU
+### Multi-GPU - first
+unset NCCL_IB_DISABLE
+unset NCCL_NET
+unset NCCL_SOCKET_IFNAME
+unset NCCL_P2P_DISABLE
+unset NCCL_SHM_DISABLE
+unset TORCH_NCCL_ASYNC_ERROR_HANDLING
+NPROC_PER_NODE=4 \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+python -m torch.distributed.run --nproc_per_node 4 swift/cli/sft.py \
+--model Qwen/Qwen3-VL-2B-Instruct \
+--dataset streaming_video \
+--train_type full \
+--torch_dtype bfloat16 \
+--num_train_epochs 100 \
+--per_device_train_batch_size 1 \
+--attn_impl flash_attn \
+--padding_free true \
+--loss_type stream \
+--custom_register_path swift/plugin/loss.py swift/plugin/streaming_dataset.py \
+--learning_rate 1e-5 \
+--freeze_vit true \
+--freeze_aligner false \
+--gradient_accumulation_steps 64 \
+--gradient_checkpointing true \
+--save_steps 100 \
+--save_total_limit 2 \
+--logging_steps 5 \
+--output_dir output \
+--warmup_ratio 0.05 \
+--deepspeed zero3 \
+--use_liger_kernel true \
+--max_length ${MAX_CONTEXT_LENGTH} \
+--dataset_num_proc 4 \
+--dataloader_num_workers 4 \
+--new_special_tokens './special_token_v1.txt'
+
+# ### Multi-GPU - second - 学習済みの重みを初期重みとして取り込んで学習開始
 # unset NCCL_IB_DISABLE
 # unset NCCL_NET
 # unset NCCL_SOCKET_IFNAME
@@ -24,7 +61,7 @@ export TORCH_DISTRIBUTED_DEBUG=DETAIL
 # --dataset streaming_video \
 # --train_type full \
 # --torch_dtype bfloat16 \
-# --num_train_epochs 1 \
+# --num_train_epochs 100 \
 # --per_device_train_batch_size 1 \
 # --attn_impl flash_attn \
 # --padding_free true \
@@ -45,7 +82,11 @@ export TORCH_DISTRIBUTED_DEBUG=DETAIL
 # --max_length ${MAX_CONTEXT_LENGTH} \
 # --dataset_num_proc 4 \
 # --dataloader_num_workers 4 \
-# --new_special_tokens './special_token_v1.txt'
+# --new_special_tokens './special_token_v1.txt' \
+# --resume_from_checkpoint /home/b920405/Streamo/output/v20-20260901-061059/checkpoint-75 \
+# --resume_only_model true \
+# --ignore_data_skip true
+
 
 ### resume???
 
@@ -81,33 +122,33 @@ export TORCH_DISTRIBUTED_DEBUG=DETAIL
 # --resume_from_checkpoint /path/to/previous_run_dir/checkpoint-300
 
 
-## Single-GPU
-export NCCL_IB_DISABLE=1
-export NCCL_SOCKET_IFNAME=ens6
-CUDA_VISIBLE_DEVICES=0 \
-uv run python swift/cli/sft.py \
---model Qwen/Qwen3-VL-2B-Instruct \
---dataset streaming_video \
---train_type full \
---torch_dtype bfloat16 \
---num_train_epochs 1 \
---per_device_train_batch_size 1 \
---attn_impl flash_attn \
---padding_free true \
---loss_type stream \
---custom_register_path swift/plugin/loss.py swift/plugin/streaming_dataset.py \
---learning_rate 1e-5 \
---freeze_vit true \
---freeze_aligner false \
---gradient_accumulation_steps 64 \
---gradient_checkpointing true \
---save_steps 100 \
---save_total_limit 2 \
---logging_steps 5 \
---output_dir output \
---warmup_ratio 0.05 \
---use_liger_kernel true \
---max_length ${MAX_CONTEXT_LENGTH} \
---dataset_num_proc 4 \
---dataloader_num_workers 4 \
---new_special_tokens './special_token_v1.txt'
+# ## Single-GPU
+# export NCCL_IB_DISABLE=1
+# export NCCL_SOCKET_IFNAME=ens6
+# CUDA_VISIBLE_DEVICES=0 \
+# uv run python swift/cli/sft.py \
+# --model Qwen/Qwen3-VL-2B-Instruct \
+# --dataset streaming_video \
+# --train_type full \
+# --torch_dtype bfloat16 \
+# --num_train_epochs 1 \
+# --per_device_train_batch_size 1 \
+# --attn_impl flash_attn \
+# --padding_free true \
+# --loss_type stream \
+# --custom_register_path swift/plugin/loss.py swift/plugin/streaming_dataset.py \
+# --learning_rate 1e-5 \
+# --freeze_vit true \
+# --freeze_aligner false \
+# --gradient_accumulation_steps 64 \
+# --gradient_checkpointing true \
+# --save_steps 100 \
+# --save_total_limit 2 \
+# --logging_steps 5 \
+# --output_dir output \
+# --warmup_ratio 0.05 \
+# --use_liger_kernel true \
+# --max_length ${MAX_CONTEXT_LENGTH} \
+# --dataset_num_proc 4 \
+# --dataloader_num_workers 4 \
+# --new_special_tokens './special_token_v1.txt'
