@@ -12,3 +12,5 @@ frames/
 output/
 demo/*.mp4
 stream_*/
+*.mp4
+*.webm

@@ -17,28 +17,6 @@ os.environ['MIN_PIXELS'] = '3136'
 os.environ['MAX_PIXELS'] = '100352'
 
 
-# SYSTEM = """
-# You are a helpful assistant specializing in streaming video analysis.
-# You will receive input frame by frame, each labeled with absolute time intervals
-# in the exact format <Xs-Ys> (e.g., <0s-1s>). Follow these rules precisely:
-
-# 1. Use </Silence> when:
-#     - No relevant event has started, OR
-#     - The current input is irrelevant to the given question.
-
-# 2. Use </Standby> when:
-#     - An event is in progress but has not yet completed, OR
-#     - The current input is relevant but the question cannot yet be answered.
-
-# 3. Use </Response> only when:
-#     - An event has fully concluded, OR
-#     - The available information is sufficient to fully answer the question.
-#     Provide a complete description at this point.
-
-# Do not provide partial answers or speculate beyond the given information.
-# Whenever you deliver an answer, begin with </Response>.
-# """
-
 SYSTEM = """
 You are a helpful assistant specializing in streaming video analysis.
 You will receive input frame by frame, each labeled with absolute time intervals
@@ -57,14 +35,37 @@ in the exact format <Xs-Ys> (e.g., <0s-1s>). Follow these rules precisely:
     - The available information is sufficient to fully answer the question.
     Provide a complete description at this point.
 
+Do not provide partial answers or speculate beyond the given information.
 Whenever you deliver an answer, begin with </Response>.
 """
+
+# SYSTEM = """
+# You are a helpful assistant specializing in streaming video analysis.
+# You will receive input frame by frame, each labeled with absolute time intervals
+# in the exact format <Xs-Ys> (e.g., <0s-1s>). Follow these rules precisely:
+
+# 1. Use </Silence> when:
+#     - No relevant event has started, OR
+#     - The current input is irrelevant to the given question.
+
+# 2. Use </Standby> when:
+#     - An event is in progress but has not yet completed, OR
+#     - The current input is relevant but the question cannot yet be answered.
+
+# 3. Use </Response> only when:
+#     - An event has fully concluded, OR
+#     - The available information is sufficient to fully answer the question.
+#     Provide a complete description at this point.
+
+# Whenever you deliver an answer, begin with </Response>.
+# """
 
 STATE_SILENCE = '</Silence>'
 STATE_STANDBY = '</Standby>'
 STATE_RESPONSE = '</Response>'
 RESPONSE_PREFIXES = (STATE_RESPONSE, STATE_STANDBY, STATE_SILENCE)
 DEFAULT_SUBTITLE_MAX_LINES = 4
+SILENCE_SUBTITLE_DURATION_SEC = 4.0
 DEFAULT_QUESTION = 'Detect and summarize each event sequence in the video.'
 SUBTITLE_FONT_CANDIDATES = (
     '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
@@ -321,10 +322,20 @@ def str2bool(value: str) -> bool:
 
 
 def build_subtitle_text(response_type: str, response_body: str) -> str:
-    if response_type != STATE_RESPONSE:
-        return ''
     subtitle_text = response_body.strip()
-    return subtitle_text or STATE_RESPONSE
+    if response_type == STATE_RESPONSE:
+        return subtitle_text or STATE_RESPONSE
+    if response_type == STATE_SILENCE:
+        return subtitle_text
+    return ''
+
+
+def subtitle_duration_sec(response_type: str, subtitle_text: str, fps: float) -> float:
+    if not subtitle_text:
+        return 0.0
+    if response_type == STATE_SILENCE:
+        return SILENCE_SUBTITLE_DURATION_SEC
+    return 1.0 / fps
 
 
 def ensure_parent_dir(path: Optional[str]) -> Optional[Path]:
@@ -477,10 +488,17 @@ def video_fourcc_for_path(path: str) -> int:
 def subtitle_for_time(*, time_sec: float, fps: float, round_records: Sequence[Dict]) -> str:
     if not round_records:
         return ''
-    if time_sec >= round_records[-1]['end_sec']:
-        return ''
     round_idx = min(max(int(time_sec * fps), 0), len(round_records) - 1)
-    return round_records[round_idx].get('subtitle_text', '')
+    for record_idx in range(round_idx, -1, -1):
+        record = round_records[record_idx]
+        if record.get('start_sec', record_idx / fps) > time_sec:
+            continue
+        subtitle_text = record.get('subtitle_text', '')
+        if not subtitle_text:
+            continue
+        subtitle_end_sec = record.get('subtitle_end_sec', record.get('end_sec', (record_idx + 1) / fps))
+        return subtitle_text if time_sec < subtitle_end_sec else ''
+    return ''
 
 
 def render_subtitle_video(
@@ -641,14 +659,22 @@ def main():
 
         output[f"Round {i}"] = answer
         response_type, response_body = parse_response(answer)
+        subtitle_text = build_subtitle_text(response_type, response_body)
+        round_start_sec = i / target_fps
+        round_end_sec = (i + 1) / target_fps
         round_records.append({
             'round': i,
-            'start_sec': i,
-            'end_sec': i + 1,
+            'start_sec': round_start_sec,
+            'end_sec': round_end_sec,
             'response': answer,
             'response_type': response_type,
             'response_body': response_body,
-            'subtitle_text': build_subtitle_text(response_type, response_body),
+            'subtitle_text': subtitle_text,
+            'subtitle_end_sec': round_start_sec + subtitle_duration_sec(
+                response_type,
+                subtitle_text,
+                target_fps,
+            ),
         })
         print("=====Round", i, "=====")
         print(f"Answer: {answer}")
