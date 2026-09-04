@@ -29,25 +29,48 @@ class TestInferenceSubtitles(unittest.TestCase):
         self.assertEqual(self.module.build_subtitle_text(self.module.STATE_SILENCE, ''), '')
         self.assertEqual(self.module.build_subtitle_text(self.module.STATE_STANDBY, 'Pending.'), '')
 
-    def test_silence_body_is_rendered_for_four_seconds(self):
+    def test_caption_is_rendered_for_eight_seconds(self):
         records = [
             {
                 'start_sec': 0.0,
                 'end_sec': 1.0,
                 'subtitle_text': 'Customer is waiting.',
-                'subtitle_end_sec': 4.0,
+                'subtitle_end_sec': 8.0,
             },
-            {'start_sec': 1.0, 'end_sec': 2.0, 'subtitle_text': '', 'subtitle_end_sec': 1.0},
-            {'start_sec': 2.0, 'end_sec': 3.0, 'subtitle_text': '', 'subtitle_end_sec': 2.0},
-            {'start_sec': 3.0, 'end_sec': 4.0, 'subtitle_text': '', 'subtitle_end_sec': 3.0},
-            {'start_sec': 4.0, 'end_sec': 5.0, 'subtitle_text': '', 'subtitle_end_sec': 4.0},
+            *[
+                {
+                    'start_sec': float(second),
+                    'end_sec': float(second + 1),
+                    'subtitle_text': '',
+                    'subtitle_end_sec': float(second),
+                }
+                for second in range(1, 9)
+            ],
         ]
 
         self.assertEqual(
-            self.module.subtitle_for_time(time_sec=3.999, fps=1.0, round_records=records),
+            self.module.subtitle_for_time(time_sec=7.999, fps=1.0, round_records=records),
             'Customer is waiting.',
         )
-        self.assertEqual(self.module.subtitle_for_time(time_sec=4.0, fps=1.0, round_records=records), '')
+        self.assertEqual(self.module.subtitle_for_time(time_sec=8.0, fps=1.0, round_records=records), '')
+
+    def test_non_empty_subtitle_duration_defaults_to_eight_seconds(self):
+        self.assertEqual(
+            self.module.subtitle_duration_sec(
+                self.module.STATE_RESPONSE,
+                'An agent responds.',
+                fps=1.0,
+            ),
+            8.0,
+        )
+        self.assertEqual(
+            self.module.subtitle_duration_sec(
+                self.module.STATE_SILENCE,
+                'Customer is waiting.',
+                fps=1.0,
+            ),
+            8.0,
+        )
 
     def test_newer_caption_replaces_active_silence_caption(self):
         records = [

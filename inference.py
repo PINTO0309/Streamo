@@ -65,7 +65,7 @@ STATE_STANDBY = '</Standby>'
 STATE_RESPONSE = '</Response>'
 RESPONSE_PREFIXES = (STATE_RESPONSE, STATE_STANDBY, STATE_SILENCE)
 DEFAULT_SUBTITLE_MAX_LINES = 4
-SILENCE_SUBTITLE_DURATION_SEC = 4.0
+DEFAULT_SUBTITLE_DURATION_SEC = 8.0
 DEFAULT_QUESTION = 'Detect and summarize each event sequence in the video.'
 SUBTITLE_FONT_CANDIDATES = (
     '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
@@ -330,12 +330,15 @@ def build_subtitle_text(response_type: str, response_body: str) -> str:
     return ''
 
 
-def subtitle_duration_sec(response_type: str, subtitle_text: str, fps: float) -> float:
+def subtitle_duration_sec(
+    response_type: str,
+    subtitle_text: str,
+    fps: float,
+    duration_sec: float = DEFAULT_SUBTITLE_DURATION_SEC,
+) -> float:
     if not subtitle_text:
         return 0.0
-    if response_type == STATE_SILENCE:
-        return SILENCE_SUBTITLE_DURATION_SEC
-    return 1.0 / fps
+    return duration_sec
 
 
 def ensure_parent_dir(path: Optional[str]) -> Optional[Path]:
@@ -560,6 +563,8 @@ def parse_args():
     parser.add_argument('--save-video', default='./output/cook_output.mp4', help='Output video path with rendered subtitles.')
     parser.add_argument('--subtitle-font-path', default=None, help='Optional font path for subtitle rendering.')
     parser.add_argument('--subtitle-max-lines', type=int, default=DEFAULT_SUBTITLE_MAX_LINES, help='Maximum subtitle lines rendered into --save-video.')
+    parser.add_argument('--subtitle-duration', type=float, default=DEFAULT_SUBTITLE_DURATION_SEC,
+                        help='Display duration in seconds for each non-empty subtitle.')
     parser.add_argument('--question', default=DEFAULT_QUESTION, help='Question text for the streaming prompt.')
     parser.add_argument('--global-question', type=str2bool, default=True, help='Re-inject the question into the first visible user turn after truncation.')
     parser.add_argument('--system-prompt', default=SYSTEM, help='System prompt text.')
@@ -570,6 +575,8 @@ def parse_args():
         parser.error('--fps must be > 0.')
     if args.subtitle_max_lines <= 0:
         parser.error('--subtitle-max-lines must be > 0.')
+    if args.subtitle_duration <= 0:
+        parser.error('--subtitle-duration must be > 0.')
     if args.window_size <= 0:
         parser.error('--window-size must be > 0.')
     if args.question_time < 0:
@@ -590,6 +597,7 @@ def main():
     save_video_path = args.save_video
     subtitle_font_path = args.subtitle_font_path
     subtitle_max_lines = args.subtitle_max_lines
+    subtitle_duration = args.subtitle_duration
     question = args.question
     global_question = args.global_question
     system = args.system_prompt
@@ -604,6 +612,7 @@ def main():
     print(f'save_video: {save_video_path}')
     print(f'question: {question}')
     print(f'window_size: {max_rounds}')
+    print(f'subtitle_duration: {subtitle_duration}s')
 
     if infer_backend == 'pt':
         engine = PtEngine(model, max_batch_size=64)
@@ -674,6 +683,7 @@ def main():
                 response_type,
                 subtitle_text,
                 target_fps,
+                subtitle_duration,
             ),
         })
         print("=====Round", i, "=====")

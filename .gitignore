@@ -14,3 +14,4 @@ demo/*.mp4
 stream_*/
 *.mp4
 *.webm
+test_sample_video.jsonl
