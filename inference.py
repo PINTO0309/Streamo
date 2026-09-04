@@ -66,6 +66,7 @@ STATE_RESPONSE = '</Response>'
 RESPONSE_PREFIXES = (STATE_RESPONSE, STATE_STANDBY, STATE_SILENCE)
 DEFAULT_SUBTITLE_MAX_LINES = 4
 DEFAULT_SUBTITLE_DURATION_SEC = 8.0
+NO_TARGET_USER_PREFIX = 'No target user'
 DEFAULT_QUESTION = 'Detect and summarize each event sequence in the video.'
 SUBTITLE_FONT_CANDIDATES = (
     '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
@@ -312,6 +313,28 @@ def parse_response(response: str) -> Tuple[str, str]:
     return 'other', response
 
 
+def is_no_target_user_response(response_type: str, response_body: str) -> bool:
+    return (
+        response_type == STATE_RESPONSE
+        and response_body.lstrip().casefold().startswith(NO_TARGET_USER_PREFIX.casefold())
+    )
+
+
+def response_body_from_record(record: Dict) -> str:
+    response_body = record.get('response_body')
+    if response_body is not None:
+        return str(response_body)
+    _, parsed_body = parse_response(str(record.get('response', '')))
+    return parsed_body
+
+
+def is_no_target_user_record(record: Dict) -> bool:
+    return is_no_target_user_response(
+        str(record.get('response_type', '')),
+        response_body_from_record(record),
+    )
+
+
 def str2bool(value: str) -> bool:
     value = value.strip().lower()
     if value in {'1', 'true', 'yes', 'y', 'on'}:
@@ -324,6 +347,8 @@ def str2bool(value: str) -> bool:
 def build_subtitle_text(response_type: str, response_body: str) -> str:
     subtitle_text = response_body.strip()
     if response_type == STATE_RESPONSE:
+        if is_no_target_user_response(response_type, response_body):
+            return ''
         return subtitle_text or STATE_RESPONSE
     if response_type == STATE_SILENCE:
         return subtitle_text
@@ -483,6 +508,154 @@ def draw_subtitle_on_frame(
     return cv2.cvtColor(np.array(composed), cv2.COLOR_RGB2BGR)
 
 
+def format_timeline_time(time_sec: float) -> str:
+    total_seconds = max(0, int(time_sec))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f'{hours}:{minutes:02d}:{seconds:02d}'
+    return f'{minutes}:{seconds:02d}'
+
+
+def response_marker_times(round_records: Sequence[Dict]) -> List[float]:
+    return [
+        float(record['start_sec'])
+        for record in round_records
+        if (
+            record.get('response_type') == STATE_RESPONSE
+            and 'start_sec' in record
+            and not is_no_target_user_record(record)
+        )
+    ]
+
+
+def standby_time_ranges(round_records: Sequence[Dict]) -> List[Tuple[float, float]]:
+    ranges: List[Tuple[float, float]] = []
+    for record in round_records:
+        if record.get('response_type') != STATE_STANDBY:
+            continue
+        if 'start_sec' not in record or 'end_sec' not in record:
+            continue
+
+        start_sec = float(record['start_sec'])
+        end_sec = float(record['end_sec'])
+        if end_sec <= start_sec:
+            continue
+
+        if ranges and start_sec <= ranges[-1][1]:
+            previous_start, previous_end = ranges[-1]
+            ranges[-1] = (previous_start, max(previous_end, end_sec))
+        else:
+            ranges.append((start_sec, end_sec))
+    return ranges
+
+
+def draw_timeline_on_frame(
+    frame: np.ndarray,
+    *,
+    time_sec: float,
+    duration_sec: float,
+    response_times: Sequence[float],
+    standby_ranges: Sequence[Tuple[float, float]] = (),
+) -> np.ndarray:
+    if duration_sec <= 0:
+        return frame
+
+    height, width = frame.shape[:2]
+    if height <= 0 or width <= 0:
+        return frame
+
+    band_height = min(height, max(54, height // 10))
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (width, band_height), (0, 0, 0), thickness=-1)
+    frame = cv2.addWeighted(overlay, 0.68, frame, 0.32, 0)
+
+    margin = max(16, width // 24)
+    timeline_left = min(margin, max(0, width - 1))
+    timeline_right = max(timeline_left, width - margin - 1)
+    timeline_width = max(1, timeline_right - timeline_left)
+    timeline_y = min(band_height - 13, max(30, band_height * 2 // 3))
+    font_scale = max(0.35, min(0.7, width / 1600.0))
+    font_thickness = max(1, width // 1200)
+
+    cv2.line(
+        frame,
+        (timeline_left, timeline_y),
+        (timeline_right, timeline_y),
+        (190, 190, 190),
+        thickness=max(2, height // 360),
+        lineType=cv2.LINE_AA,
+    )
+
+    def x_for_time(value: float) -> int:
+        progress = min(max(value / duration_sec, 0.0), 1.0)
+        return int(round(timeline_left + progress * timeline_width))
+
+    standby_thickness = max(6, height // 180)
+    for standby_start, standby_end in standby_ranges:
+        start_x = x_for_time(standby_start)
+        end_x = max(start_x + 1, x_for_time(standby_end))
+        cv2.line(
+            frame,
+            (start_x, timeline_y),
+            (min(timeline_right, end_x), timeline_y),
+            (205, 145, 85),
+            thickness=standby_thickness,
+            lineType=cv2.LINE_AA,
+        )
+
+    marker_radius = max(4, min(8, height // 90))
+    for response_time in response_times:
+        marker_x = x_for_time(response_time)
+        marker_points = np.array([
+            [marker_x, timeline_y - marker_radius],
+            [marker_x + marker_radius, timeline_y],
+            [marker_x, timeline_y + marker_radius],
+            [marker_x - marker_radius, timeline_y],
+        ], dtype=np.int32)
+        cv2.fillConvexPoly(frame, marker_points, (0, 70, 255), lineType=cv2.LINE_AA)
+
+    current_x = x_for_time(time_sec)
+    cv2.line(
+        frame,
+        (current_x, max(2, timeline_y - marker_radius - 8)),
+        (current_x, min(band_height - 2, timeline_y + marker_radius + 5)),
+        (0, 220, 255),
+        thickness=max(2, width // 640),
+        lineType=cv2.LINE_AA,
+    )
+
+    start_label = format_timeline_time(0)
+    end_label = format_timeline_time(duration_sec)
+    cv2.putText(
+        frame,
+        start_label,
+        (timeline_left, 18),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        (255, 255, 255),
+        font_thickness,
+        cv2.LINE_AA,
+    )
+    end_label_size = cv2.getTextSize(
+        end_label,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        font_thickness,
+    )[0]
+    cv2.putText(
+        frame,
+        end_label,
+        (max(0, timeline_right - end_label_size[0]), 18),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        (255, 255, 255),
+        font_thickness,
+        cv2.LINE_AA,
+    )
+    return frame
+
+
 def video_fourcc_for_path(path: str) -> int:
     suffix = Path(path).suffix.lower()
     return cv2.VideoWriter_fourcc(*('mp4v' if suffix == '.mp4' else 'MJPG'))
@@ -496,6 +669,8 @@ def subtitle_for_time(*, time_sec: float, fps: float, round_records: Sequence[Di
         record = round_records[record_idx]
         if record.get('start_sec', record_idx / fps) > time_sec:
             continue
+        if is_no_target_user_record(record):
+            return ''
         subtitle_text = record.get('subtitle_text', '')
         if not subtitle_text:
             continue
@@ -518,11 +693,15 @@ def render_subtitle_video(
         raise ValueError(f'Cannot open video for subtitle rendering: {video_path}')
 
     original_fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     if original_fps <= 0:
         cap.release()
         raise ValueError(f'Invalid FPS for video: {video_path}')
+    duration_sec = total_frames / original_fps
+    response_times = response_marker_times(round_records)
+    standby_ranges = standby_time_ranges(round_records)
 
     writer = cv2.VideoWriter(output_path, video_fourcc_for_path(output_path), original_fps, (width, height))
     if not writer.isOpened():
@@ -535,8 +714,9 @@ def render_subtitle_video(
             success, frame = cap.read()
             if not success:
                 break
+            time_sec = frame_idx / original_fps
             subtitle_text = subtitle_for_time(
-                time_sec=frame_idx / original_fps,
+                time_sec=time_sec,
                 fps=fps,
                 round_records=round_records,
             )
@@ -547,6 +727,13 @@ def render_subtitle_video(
                     font_path=font_path,
                     max_lines=max_lines,
                 )
+            frame = draw_timeline_on_frame(
+                frame,
+                time_sec=time_sec,
+                duration_sec=duration_sec,
+                response_times=response_times,
+                standby_ranges=standby_ranges,
+            )
             writer.write(frame)
             frame_idx += 1
     finally:
