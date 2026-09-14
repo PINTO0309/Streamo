@@ -506,10 +506,8 @@ def draw_subtitle_on_frame(
 
     line_spacing = max(6, font_size // 4)
     line_heights: List[int] = []
-    line_widths: List[int] = []
     for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font)
-        line_widths.append(bbox[2] - bbox[0])
         line_heights.append(bbox[3] - bbox[1])
 
     padding_x = max(16, width // 40)
@@ -526,8 +524,8 @@ def draw_subtitle_on_frame(
 
     y = box_top + padding_y
     stroke_width = max(1, font_size // 18)
-    for line, line_width, line_height in zip(lines, line_widths, line_heights):
-        x = (width - line_width) / 2
+    for line, line_height in zip(lines, line_heights):
+        x = horizontal_margin + padding_x
         draw.text(
             (x, y),
             line,
