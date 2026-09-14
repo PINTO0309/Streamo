@@ -21,6 +21,59 @@ class TestInferenceSubtitles(unittest.TestCase):
     def setUpClass(cls):
         cls.module = load_inference_module()
 
+    def test_frame_sampling_time_uses_target_fps(self):
+        extractor = object.__new__(self.module.VideoFrameExtractor)
+        extractor.cap = None
+        for fps in (1.0, 3.0, 5.0, 10.0, 15.0):
+            with self.subTest(fps=fps):
+                extractor.target_fps = fps
+                sampled_times = []
+                extractor.get_frame_at_time = lambda time_sec: sampled_times.append(time_sec)
+
+                extractor.get_frame_at_round(30)
+
+                self.assertEqual(sampled_times, [30 / fps])
+
+    def test_user_time_tag_uses_target_fps(self):
+        self.assertEqual(
+            self.module.make_user_content(
+                round_num=1,
+                fps=5.0,
+                question='Question?',
+                include_question=True,
+            ),
+            'Question?\n<0.2s-0.4s>\n<image>',
+        )
+
+    def test_user_time_tag_formats_fifteen_fps_boundaries(self):
+        self.assertEqual(
+            self.module.make_user_content(
+                round_num=1,
+                fps=15.0,
+                question=None,
+                include_question=False,
+            ),
+            '<0.067s-0.133s>\n<image>',
+        )
+
+    def test_stream_window_uses_extractor_fps_in_time_tag(self):
+        class StubExtractor:
+            target_fps = 5.0
+
+            @staticmethod
+            def get_frame_at_round(round_num):
+                return round_num
+
+        data = self.module.get_data_stream_video_window(
+            video_extractor=StubExtractor(),
+            round_num=0,
+            system='System',
+            question='Question?',
+            question_time=0,
+        )
+
+        self.assertEqual(data['messages'][-1]['content'], 'Question?\n<0s-0.2s>\n<image>')
+
     def test_silence_body_becomes_subtitle_but_tag_only_does_not(self):
         self.assertEqual(
             self.module.build_subtitle_text(self.module.STATE_SILENCE, 'Customer is waiting.'),

@@ -77,6 +77,21 @@ SUBTITLE_FONT_CANDIDATES = (
 )
 
 
+def format_seconds(seconds: float) -> str:
+    if abs(seconds - round(seconds)) < 1e-9:
+        return str(int(round(seconds)))
+    return f'{seconds:.3f}'.rstrip('0').rstrip('.')
+
+
+def make_user_content(round_num: int, fps: float, question: Optional[str], include_question: bool) -> str:
+    start_sec = round_num / fps
+    end_sec = (round_num + 1) / fps
+    time_tag = f'<{format_seconds(start_sec)}s-{format_seconds(end_sec)}s>\n<image>'
+    if include_question and question:
+        return f'{question}\n{time_tag}'
+    return time_tag
+
+
 class VideoFrameExtractor:
     """Extract frames from video file at specified fps"""
 
@@ -124,8 +139,8 @@ class VideoFrameExtractor:
         return Image.fromarray(frame_rgb)
 
     def get_frame_at_round(self, round_num: int) -> Image.Image:
-        """Get frame at specified round (each round corresponds to 1 second)"""
-        time_sec = round_num  # Each round corresponds to 1 second
+        """Get the frame at the sampling time represented by the round."""
+        time_sec = round_num / self.target_fps
         return self.get_frame_at_time(time_sec)
 
     def get_total_rounds(self) -> int:
@@ -184,10 +199,15 @@ def get_data_stream_video(
             {'role': 'system', 'content': system},
         ]
 
-        if round_num == question_time:
-            messages.append({'role': 'user', 'content': f'{question}\n<{round_num}s-{int(round_num)+1}s>\n<image>'})
-        else:
-            messages.append({'role': 'user', 'content': f"<{round_num}s-{int(round_num)+1}s>\n<image>"})
+        messages.append({
+            'role': 'user',
+            'content': make_user_content(
+                round_num,
+                video_extractor.target_fps,
+                question,
+                round_num == question_time,
+            ),
+        })
 
         data['images'] = [frame]  # Directly use PIL.Image object
         data['messages'] = messages
@@ -195,10 +215,15 @@ def get_data_stream_video(
     else:
         messages = data['messages']
         messages.append({'role': 'assistant', 'content': answer})
-        if round_num == question_time:
-            messages.append({'role': 'user', 'content': f'{question}\n<{round_num}s-{int(round_num)+1}s>\n<image>'})
-        else:
-            messages.append({'role': 'user', 'content': f"<{round_num}s-{int(round_num)+1}s>\n<image>"})
+        messages.append({
+            'role': 'user',
+            'content': make_user_content(
+                round_num,
+                video_extractor.target_fps,
+                question,
+                round_num == question_time,
+            ),
+        })
 
         data['images'].append(frame)
         data['messages'] = messages
@@ -236,12 +261,6 @@ def get_data_stream_video_window(
     # Get frame for current round
     frame = video_extractor.get_frame_at_round(round_num)
 
-    def make_user_content(r: int, include_question: bool = False) -> str:
-        time_tag = f"<{r}s-{r + 1}s>\n<image>"
-        if include_question and question:
-            return f"{question}\n{time_tag}"
-        return time_tag
-
     if data is None:
         # Initialize data
         if round_num != 0:
@@ -257,7 +276,12 @@ def get_data_stream_video_window(
         include_q = global_question or (round_num == question_time)
         messages.append({
             'role': 'user',
-            'content': make_user_content(round_num, include_q)
+            'content': make_user_content(
+                round_num,
+                video_extractor.target_fps,
+                question,
+                include_q,
+            ),
         })
 
         data['images'] = [frame]
@@ -276,7 +300,12 @@ def get_data_stream_video_window(
         include_q = (round_num == question_time)
         messages.append({
             'role': 'user',
-            'content': make_user_content(round_num, include_q)
+            'content': make_user_content(
+                round_num,
+                video_extractor.target_fps,
+                question,
+                include_q,
+            ),
         })
 
         # Add current frame
@@ -295,7 +324,12 @@ def get_data_stream_video_window(
             include_q_start = global_question or (question_time == start_round)
             new_messages[1] = {
                 'role': 'user',
-                'content': make_user_content(start_round, include_q_start)
+                'content': make_user_content(
+                    start_round,
+                    video_extractor.target_fps,
+                    question,
+                    include_q_start,
+                ),
             }
 
             new_images = data['images'][rounds_to_remove:]
