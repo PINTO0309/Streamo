@@ -2,8 +2,8 @@
 
 set -uo pipefail
 
-MODEL_TARGET='v21-20260903-014339/checkpoint-750'
-QUESTION='Key customer service behaviors and states observed in the target users.'
+MODEL_TARGET='v26-20260911-234310/checkpoint-750'
+QUESTION='カスタマーサービスを提供するうえでターゲットとなるユーザーの注目すべき重要な行動や状態は？'
 FPS_VALUES=(1.0 3.0 5.0)
 WINDOW_SIZE_VALUES=(5 15 25)
 
