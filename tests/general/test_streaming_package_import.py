@@ -98,3 +98,45 @@ def test_train_launcher_imports_shared_utilities_in_workers(tmp_path):
     assert launched.returncode == 0, launched.stdout
     assert (source / 'worker_0').read_text() == 'ok'
     assert (source / 'worker_1').read_text() == 'ok'
+
+
+@pytest.mark.parametrize('launch_mode', ['script', 'torchrun_script', 'torchrun_module'])
+def test_real_sft_entrypoint_imports_checkout_without_installation(tmp_path, launch_mode):
+    source = tmp_path / 'source'
+    cli = source / 'swift' / 'cli'
+    cli.mkdir(parents=True)
+    (source / 'swift' / '__init__.py').touch()
+    (cli / '__init__.py').touch()
+    shutil.copy2(ROOT / 'swift' / 'cli' / 'sft.py', cli / 'sft.py')
+    shutil.copytree(ROOT / 'streamo_utils', source / 'streamo_utils', ignore=shutil.ignore_patterns('__pycache__'))
+    llm = source / 'swift' / 'llm'
+    llm.mkdir()
+    # Stop at sft_main to test imports without model downloads, CUDA, or training dependencies.
+    (llm / '__init__.py').write_text(
+        'import os\n'
+        'from pathlib import Path\n'
+        'from streamo_utils import streaming\n'
+        'root = Path(__file__).resolve().parents[2]\n'
+        'assert Path(streaming.__file__).is_relative_to(root)\n'
+        'assert streaming.sampling_indices(8, 8, 4) == [1, 3, 5, 7]\n'
+        'def sft_main():\n'
+        '    (root / ("worker_" + os.environ.get("RANK", "0"))).write_text("ok")\n',
+        encoding='utf-8')
+    # An unrelated cwd also checks that the script finds its root from __file__.
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    cwd = outside
+    entrypoint = [str(cli / 'sft.py')]
+    worker_count = 1
+    if launch_mode.startswith('torchrun'):
+        worker_count = 4
+        if launch_mode == 'torchrun_module':
+            cwd = source
+            entrypoint = ['--module', 'swift.cli.sft']
+        entrypoint = [
+            '-m', 'torch.distributed.run', '--standalone', '--nproc_per_node', str(worker_count), *entrypoint,
+        ]
+    launched = run_python(entrypoint, cwd=cwd)
+    assert launched.returncode == 0, launched.stdout
+    for rank in range(worker_count):
+        assert (source / f'worker_{rank}').read_text() == 'ok'

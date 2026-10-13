@@ -45,6 +45,8 @@ python -m pip install --no-deps -e .
 
 Run these commands from the repository root. The editable install registers both `swift` and the shared `streamo_utils` package. If an older installation reports `ModuleNotFoundError: No module named 'streamo_utils'`, rerun `python -m pip install --no-deps -e .` to update the registration. `train.sh` launches training workers with `--module swift.cli.sft` so they can import modules from the repository root.
 
+Existing commands such as `python -m torch.distributed.run --nproc_per_node 4 swift/cli/sft.py ...` also work. The entrypoint adds its own repository root to the import path, including when an editable installation predates the shared package. Run training commands from the repository root so relative dataset, plugin, and special-token paths resolve correctly.
+
 ## Streaming Inference Demo
 
 Use `examples/infer/streaming_action_caption_demo.py` for round-by-round streaming inference with trained weights. The recommended backend is `pt`; `vllm` is supported as an optional path for the same CLI.
@@ -161,6 +163,15 @@ During training, the registered streaming-video preprocessor:
 5. stores or reuses cached frames from disk.
 
 `bash train.sh` downsizes frames wider than 640 before saving PNGs. For example, 1280×720 becomes 640×360. Frames at or below the width limit are never upscaled, and the proportional height is rounded to the nearest integer. Use `STREAMING_FRAME_MAX_WIDTH=480 bash train.sh` for a different limit, or `STREAMING_FRAME_MAX_WIDTH=0 bash train.sh` to save the original resolution.
+
+Qwen3-VL's model input size has a separate limit. The Qwen3-VL path using this repository's `qwen-vl-utils==0.0.14` does not apply `MIN_PIXELS` / `MAX_PIXELS`. `train.sh` defaults to `IMAGE_MIN_TOKEN_NUM=4` and `IMAGE_MAX_TOKEN_NUM=98`. Set these explicitly when using your own launch command:
+
+```bash
+export IMAGE_MIN_TOKEN_NUM=4
+export IMAGE_MAX_TOKEN_NUM=98
+```
+
+Each Qwen3-VL image token corresponds to 32×32 pixels, so 98 tokens gives a 100352-pixel upper limit. The actual input size follows the aspect ratio and 32-pixel rounding. Saved PNGs retain the configured maximum width of 640; this additional limit applies when preparing model inputs.
 
 Both memory and disk cache keys distinguish the resize settings, so frames cached at the original resolution or another width are not reused. Frames are extracted again as needed after a setting change. You do not need to recreate the source videos or `stream_format.json`; the 4 FPS timestamps and frame counts stay the same.
 

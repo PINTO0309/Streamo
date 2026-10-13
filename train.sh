@@ -1,5 +1,8 @@
 export MIN_PIXELS=3136
 export MAX_PIXELS=100352
+# Qwen3-VL uses a 16px patch and 2x spatial merge: 98 * (16 * 2)^2 = 100352 pixels.
+export IMAGE_MIN_TOKEN_NUM=${IMAGE_MIN_TOKEN_NUM:-4}
+export IMAGE_MAX_TOKEN_NUM=${IMAGE_MAX_TOKEN_NUM:-98}
 export MAX_CONTEXT_LENGTH=32768 # Default: 32768
 export USE_HF=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce memory fragmentation

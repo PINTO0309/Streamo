@@ -40,6 +40,8 @@ python -m pip install --no-deps -e .
 
 リポジトリ直下で実行してください。editable install では `swift` と共通モジュール `streamo_utils` を登録します。以前インストールした環境で `ModuleNotFoundError: No module named 'streamo_utils'` が出る場合も、上の `python -m pip install --no-deps -e .` で登録を更新できます。`train.sh` は `--module swift.cli.sft` で学習ワーカーを起動し、リポジトリ直下のモジュールを読み込みます。
 
+既存の `python -m torch.distributed.run --nproc_per_node 4 swift/cli/sft.py ...` という起動方法も利用できます。`sft.py` が自身の配置場所からリポジトリ直下を検索パスに追加するため、共通モジュールの追加後に再インストールしていない環境でも読み込めます。データ・プラグイン・特殊トークンの相対パスを解決するため、学習コマンドはリポジトリ直下で実行してください。
+
 ## Streaming Inference Demo
 
 学習済み重みを使った round-by-round のストリーミング推論には `examples/infer/streaming_action_caption_demo.py` を使います。推奨 backend は `pt` で、`vllm` は同じ CLI の任意オプションとして扱います。
@@ -156,6 +158,15 @@ backend ごとの差分:
 5. 抽出済みフレームをディスクに保存または再利用する
 
 `bash train.sh` では、幅が640を超えるフレームをPNG保存前に縮小します。たとえば1280×720は640×360になります。幅640以下のフレームは拡大せず、高さは縦横比に合わせて最も近い整数に丸めます。別の上限を使う場合は `STREAMING_FRAME_MAX_WIDTH=480 bash train.sh`、元の解像度で保存する場合は `STREAMING_FRAME_MAX_WIDTH=0 bash train.sh` を指定してください。
+
+Qwen3-VLのモデル入力サイズは別の設定です。本リポジトリの `qwen-vl-utils==0.0.14` を使うQwen3-VL経路では、`MIN_PIXELS` / `MAX_PIXELS` の指定は反映されません。`train.sh` は `IMAGE_MIN_TOKEN_NUM=4` と `IMAGE_MAX_TOKEN_NUM=98` を既定値として設定します。独自の起動コマンドを使う場合も、事前に次を指定してください。
+
+```bash
+export IMAGE_MIN_TOKEN_NUM=4
+export IMAGE_MAX_TOKEN_NUM=98
+```
+
+Qwen3-VLでは画像トークン1個が32×32画素に相当するため、98トークンは100352画素の上限に相当します。実際の入力は縦横比と32画素単位の丸めに応じて縮小されます。保存PNGは幅640を維持し、モデルに渡す際にこの上限を適用します。
 
 サイズ設定はメモリ・ディスク両方のキャッシュキーに含まれ、元の解像度や別の幅で作ったキャッシュとは区別されます。設定変更後は必要なフレームが自動的に再抽出されます。元動画や `stream_format.json` の作り直しは不要で、4 FPSの抽出時刻・フレーム数も変わりません。
 
