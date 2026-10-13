@@ -40,7 +40,10 @@ This is the official implementation of the paper 'Streaming Video Instruction Tu
 ```bash
 pip install -r requirements.txt
 pip install google-cloud-storage
+python -m pip install --no-deps -e .
 ```
+
+Run these commands from the repository root. The editable install registers both `swift` and the shared `streamo_utils` package. If an older installation reports `ModuleNotFoundError: No module named 'streamo_utils'`, rerun `python -m pip install --no-deps -e .` to update the registration. `train.sh` launches training workers with `--module swift.cli.sft` so they can import modules from the repository root.
 
 ## Streaming Inference Demo
 

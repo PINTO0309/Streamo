@@ -21,7 +21,7 @@ unset NCCL_SHM_DISABLE
 unset TORCH_NCCL_ASYNC_ERROR_HANDLING
 NPROC_PER_NODE=4 \
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-python -m torch.distributed.run --nproc_per_node 4 swift/cli/sft.py \
+python -m torch.distributed.run --nproc_per_node 4 --module swift.cli.sft \
 --model Qwen/Qwen3-VL-2B-Instruct \
 --dataset streaming_video \
 --train_type full \
@@ -58,7 +58,7 @@ python -m torch.distributed.run --nproc_per_node 4 swift/cli/sft.py \
 # unset TORCH_NCCL_ASYNC_ERROR_HANDLING
 # NPROC_PER_NODE=4 \
 # CUDA_VISIBLE_DEVICES=0,1,2,3 \
-# python -m torch.distributed.run --nproc_per_node 4 swift/cli/sft.py \
+# python -m torch.distributed.run --nproc_per_node 4 --module swift.cli.sft \
 # --model Qwen/Qwen3-VL-2B-Instruct \
 # --dataset streaming_video \
 # --train_type full \
@@ -94,7 +94,7 @@ python -m torch.distributed.run --nproc_per_node 4 swift/cli/sft.py \
 
 # NPROC_PER_NODE=4 \
 # CUDA_VISIBLE_DEVICES=0,1,2,3 \
-# python -m torch.distributed.run --nproc_per_node 4 swift/cli/sft.py \
+# python -m torch.distributed.run --nproc_per_node 4 --module swift.cli.sft \
 # --model Qwen/Qwen3-VL-2B-Instruct \
 # --dataset streaming_video \
 # --train_type full \
@@ -128,7 +128,7 @@ python -m torch.distributed.run --nproc_per_node 4 swift/cli/sft.py \
 # export NCCL_IB_DISABLE=1
 # export NCCL_SOCKET_IFNAME=ens6
 # CUDA_VISIBLE_DEVICES=0 \
-# uv run python swift/cli/sft.py \
+# uv run python -m swift.cli.sft \
 # --model Qwen/Qwen3-VL-2B-Instruct \
 # --dataset streaming_video \
 # --train_type full \

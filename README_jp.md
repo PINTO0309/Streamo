@@ -35,7 +35,10 @@
 
 ```bash
 pip install -r requirements.txt
+python -m pip install --no-deps -e .
 ```
+
+リポジトリ直下で実行してください。editable install では `swift` と共通モジュール `streamo_utils` を登録します。以前インストールした環境で `ModuleNotFoundError: No module named 'streamo_utils'` が出る場合も、上の `python -m pip install --no-deps -e .` で登録を更新できます。`train.sh` は `--module swift.cli.sft` で学習ワーカーを起動し、リポジトリ直下のモジュールを読み込みます。
 
 ## Streaming Inference Demo
 
