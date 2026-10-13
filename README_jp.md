@@ -100,10 +100,10 @@ backend ごとの差分:
 
 出力の見方:
 
-- `Total rounds: N` は、選択した動画と FPS に対して何個の 1 秒 round を処理するかを示します。
+- `Total rounds: N` は、選択した動画と FPS に対して何個の `1 / target_fps` 秒区間を処理するかを示します。
 - `=====Round i=====` と `Answer: ...` は各 round の推論結果です。
-- `</Silence>` は、関連イベントがまだ始まっていないか、その frame が質問に無関係であることを表します。
-- `</Standby>` は、イベントが進行中であり、まだ最終回答を出す段階ではないことを表します。
+- `</Silence>` は、現時点で新たに報告する内容がないことを表します。イベント進行中も含みます。
+- `</Standby>` は旧モデルの出力を読むために認識します。新しい学習データでは待機中も `</Silence>` を使います。
 - `</Response>` は、イベントが完了したか、完全回答に十分な情報が揃ったことを表します。
 - 実行後は `./test_sample_video.jsonl` に 1 行追記され、`video_path`、`target_fps`、round ごとの出力が保存されます。
 
@@ -151,11 +151,7 @@ backend ごとの差分:
 4. `<stream>` を `<image>` に置き換える
 5. 抽出済みフレームをディスクに保存または再利用する
 
-`special_token_v1.txt` は、データセット内で使う以下のラベルと必ず一致している必要があります。
-
-- `</Silence>`
-- `</Standby>`
-- `</Response>`
+生成データは `</Silence>`（報告なし・イベント進行中）と `</Response>`（確定した応答）の2状態を使います。`</Standby>` は生成しません。既存チェックポイントのトークンIDを維持するため、`special_token_v1.txt` に未使用の `</Standby>` が残っていても問題ありません。損失関数の状態トークンはSilence／Responseの2種です。
 
 ### Raw Annotation Format
 
@@ -183,12 +179,32 @@ raw annotation の例:
 | Field | Description |
 |-------|-------------|
 | `video_path` | 絶対パスでも、`--video-prefix` で解決される相対パスでもよいです。 |
-| `question.time` | 質問は `max(0, time - 1)` フレーム目に挿入されます。たとえば `"5"` は `<4s-5s>` の user turn に入ります。 |
-| `response.st_time` | イベント区間の開始です。サンプルは `max(0, st_time - 1)` フレーム目から `</Standby>` としてラベル付けされます。 |
-| `response.end_time` | イベント区間の終了です。`</Standby>` は `max(0, end_time - 1)` フレーム目まで続き、最終応答はその次のフレームで出力されます。 |
-| `response.time` | 即時応答モードです。`st_time` と `end_time` を使わない場合、応答は `max(0, time - 1)` フレーム目で直接出力されます。 |
+| `question.time` | 秒数として扱い、`max(0, ceil(time * fps) - 1)` 番目の区間に挿入します。未来の質問を先頭には移動しません。 |
+| `response.st_time` | イベント開始時刻。区間の妥当性確認に使い、Standbyは配置しません。 |
+| `response.end_time` | 終了時刻を含む区間の末尾で1回応答します。位置は `max(0, ceil(end_time * fps) - 1)` です。 |
+| `response.time` | `st_time` / `end_time` の組がない場合の応答時刻。終了時刻と同じ配置規則です。 |
 
-時間値は整数、浮動小数、`MM:SS`、`HH:MM:SS` として解釈され、選択した `--fps` に応じてフレーム番号へ変換されます。
+時刻は数値、数値文字列、`MM:SS`、`HH:MM:SS` のすべてを秒数として解釈します。不正な時刻、開始・終了の逆転、動画長を超える応答は変換エラーとして報告します。同一区間の複数応答は改行で結合し、それ以外の区間は `</Silence>` とします。
+
+`--fps 4.0` では `<0s-0.25s>` から0.25秒ごとに区間を生成します。正確に15秒の動画は60区間となり、`end_time=15.0` の応答は `<14.75s-15s>` に入ります。末尾に端数がある動画は、最後の区間を実際の動画長で切ります。
+
+画像は各区間の末尾直前の元動画フレームです。生成・学習・推論は共通の `interval_end_v1` 規則を使います。元動画が低FPSの場合は最新のフレームを再利用します。一定FPSの動画メタデータを前提とし、無効なFPSやフレーム数は拒否します。`streaming_metadata` にFPSと抽出規則を記録し、学習時に不一致を検出します。
+
+以前の1秒刻み固定タグ・区間先頭抽出から仕様が変わるため、旧JSONは再生成してください。フレームキャッシュのキーには抽出規則のバージョンを含め、旧キャッシュの再利用を防ぎます。`prepare_report.json` の `conversion` には入力応答数、保持数、欠落数、Silence／Response区間数、応答の集約数、変換エラーを記録します。
+
+```bash
+python scripts/prepare_streamo_training_data.py \
+  --label-root ./dataset/labels \
+  --media-root ./dataset \
+  --output-raw ./dataset/stream/raw_resolved.json \
+  --output-stream ./dataset/stream/stream_format.json \
+  --report-json ./dataset/stream/prepare_report.json \
+  --fps 4.0 --num-workers 8
+
+STREAMING_DATASET_FPS=4.0 \
+STREAMING_FRAME_DIR=./dataset/stream/frames_interval_end_fps4 \
+bash train.sh
+```
 
 ### Stream-Format Training Data
 
@@ -201,7 +217,7 @@ raw annotation の例:
     {"role": "user", "content": "Your question\n<0s-1s>\n<stream>"},
     {"role": "assistant", "content": "</Silence>"},
     {"role": "user", "content": "<1s-2s>\n<stream>"},
-    {"role": "assistant", "content": "</Standby>"},
+    {"role": "assistant", "content": "</Silence>"},
     {"role": "user", "content": "<2s-3s>\n<stream>"},
     {"role": "assistant", "content": "</Response> Your answer here"}
   ],
@@ -395,8 +411,8 @@ FPS ごとに別のフレームキャッシュディレクトリを使ってく�
 
 | Token | Description |
 |-------|-------------|
-| `</Silence>` | 関連イベントがまだ始まっていない、または現在の入力が質問と無関係であることを示します。 |
-| `</Standby>` | イベント進行中、またはまだ回答に十分な情報が揃っていないことを示します。 |
+| `</Silence>` | 新たに報告する内容がないことを示します。イベント進行中や情報不足も含みます。 |
+| `</Standby>` | 既存チェックポイントとの互換性用。新しく生成する学習データには出力しません。 |
 | `</Response>` | イベントが終了した、または回答に十分な情報が揃ったことを示します。 |
 
 ### Advanced: Multiple Datasets

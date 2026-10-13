@@ -9,6 +9,8 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from streamo_utils.streaming import SYSTEM_PROMPT, format_seconds, iter_sampled_frames, sampling_indices, time_tag
+
 if TYPE_CHECKING:
     from swift.llm import InferEngine, InferRequest
 
@@ -17,48 +19,7 @@ os.environ['MIN_PIXELS'] = '3136'
 os.environ['MAX_PIXELS'] = '100352'
 
 
-SYSTEM = """
-You are a helpful assistant specializing in streaming video analysis.
-You will receive input frame by frame, each labeled with absolute time intervals
-in the exact format <Xs-Ys> (e.g., <0s-1s>). Follow these rules precisely:
-
-1. Use </Silence> when:
-    - No relevant event has started, OR
-    - The current input is irrelevant to the given question.
-
-2. Use </Standby> when:
-    - An event is in progress but has not yet completed, OR
-    - The current input is relevant but the question cannot yet be answered.
-
-3. Use </Response> only when:
-    - An event has fully concluded, OR
-    - The available information is sufficient to fully answer the question.
-    Provide a complete description at this point.
-
-Do not provide partial answers or speculate beyond the given information.
-Whenever you deliver an answer, begin with </Response>.
-"""
-
-# SYSTEM = """
-# You are a helpful assistant specializing in streaming video analysis.
-# You will receive input frame by frame, each labeled with absolute time intervals
-# in the exact format <Xs-Ys> (e.g., <0s-1s>). Follow these rules precisely:
-
-# 1. Use </Silence> when:
-#     - No relevant event has started, OR
-#     - The current input is irrelevant to the given question.
-
-# 2. Use </Standby> when:
-#     - An event is in progress but has not yet completed, OR
-#     - The current input is relevant but the question cannot yet be answered.
-
-# 3. Use </Response> only when:
-#     - An event has fully concluded, OR
-#     - The available information is sufficient to fully answer the question.
-#     Provide a complete description at this point.
-
-# Whenever you deliver an answer, begin with </Response>.
-# """
+SYSTEM = SYSTEM_PROMPT
 
 STATE_SILENCE = '</Silence>'
 STATE_STANDBY = '</Standby>'
@@ -77,19 +38,12 @@ SUBTITLE_FONT_CANDIDATES = (
 )
 
 
-def format_seconds(seconds: float) -> str:
-    if abs(seconds - round(seconds)) < 1e-9:
-        return str(int(round(seconds)))
-    return f'{seconds:.3f}'.rstrip('0').rstrip('.')
-
-
-def make_user_content(round_num: int, fps: float, question: Optional[str], include_question: bool) -> str:
-    start_sec = round_num / fps
-    end_sec = (round_num + 1) / fps
-    time_tag = f'<{format_seconds(start_sec)}s-{format_seconds(end_sec)}s>\n<image>'
+def make_user_content(round_num: int, fps: float, question: Optional[str], include_question: bool,
+                      duration: Optional[float] = None) -> str:
+    interval_tag = time_tag(round_num, fps, duration) + '\n<image>'
     if include_question and question:
-        return f'{question}\n{time_tag}'
-    return time_tag
+        return f'{question}\n{interval_tag}'
+    return interval_tag
 
 
 class VideoFrameExtractor:
@@ -112,9 +66,8 @@ class VideoFrameExtractor:
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.duration = self.total_frames / self.original_fps if self.original_fps > 0 else 0
 
-        # Calculate frame extraction interval
-        self.frame_interval = int(self.original_fps / self.target_fps)
-        self.num_extracted_frames = int(self.duration * self.target_fps)
+        self.frame_indices = sampling_indices(self.total_frames, self.original_fps, self.target_fps)
+        self.num_extracted_frames = len(self.frame_indices)
 
         print(f"Video info: {video_path}")
         print(f"  Original FPS: {self.original_fps:.2f}")
@@ -139,9 +92,9 @@ class VideoFrameExtractor:
         return Image.fromarray(frame_rgb)
 
     def get_frame_at_round(self, round_num: int) -> Image.Image:
-        """Get the frame at the sampling time represented by the round."""
-        time_sec = round_num / self.target_fps
-        return self.get_frame_at_time(time_sec)
+        """Observe the latest source frame in the completed interval."""
+        frame = next(iter_sampled_frames(self.cap, [self.frame_indices[round_num]]))
+        return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
     def get_total_rounds(self) -> int:
         """Get total number of rounds (based on video duration and target fps)"""
@@ -151,6 +104,7 @@ class VideoFrameExtractor:
         """Release video resources"""
         if self.cap is not None:
             self.cap.release()
+            self.cap = None
 
     def __del__(self):
         self.close()
@@ -206,6 +160,7 @@ def get_data_stream_video(
                 video_extractor.target_fps,
                 question,
                 round_num == question_time,
+                duration=getattr(video_extractor, 'duration', None),
             ),
         })
 
@@ -222,6 +177,7 @@ def get_data_stream_video(
                 video_extractor.target_fps,
                 question,
                 round_num == question_time,
+                duration=getattr(video_extractor, 'duration', None),
             ),
         })
 
@@ -281,6 +237,7 @@ def get_data_stream_video_window(
                 video_extractor.target_fps,
                 question,
                 include_q,
+                duration=getattr(video_extractor, 'duration', None),
             ),
         })
 
@@ -305,6 +262,7 @@ def get_data_stream_video_window(
                 video_extractor.target_fps,
                 question,
                 include_q,
+                duration=getattr(video_extractor, 'duration', None),
             ),
         })
 
@@ -329,6 +287,7 @@ def get_data_stream_video_window(
                     video_extractor.target_fps,
                     question,
                     include_q_start,
+                    duration=getattr(video_extractor, 'duration', None),
                 ),
             }
 
@@ -889,7 +848,7 @@ def main():
         response_type, response_body = parse_response(answer)
         subtitle_text = build_subtitle_text(response_type, response_body)
         round_start_sec = i / target_fps
-        round_end_sec = (i + 1) / target_fps
+        round_end_sec = min((i + 1) / target_fps, video_extractor.duration)
         round_records.append({
             'round': i,
             'start_sec': round_start_sec,

@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate.utils import gather_object
+from streamo_utils.streaming import STATE_TOKENS
 from torch import nn
 from torch.nn import CrossEntropyLoss, MSELoss
 from transformers.utils import strtobool
@@ -30,7 +31,7 @@ def stream_focal_loss(outputs, labels, special_tokens=None,
         outputs: Model outputs containing logits
         labels: Target labels
         special_tokens: List of special token IDs. If None, will be dynamically 
-                       retrieved from tokenizer using </Silence>, </Standby>, </Response>
+                       retrieved from tokenizer using </Silence> and </Response>
         gamma: Focal loss gamma parameter (default: 2.0)
         auto_alpha: Whether to automatically balance class weights (default: True)
         num_items_in_batch: Number of items for loss normalization
@@ -45,11 +46,12 @@ def stream_focal_loss(outputs, labels, special_tokens=None,
         if trainer is not None and hasattr(trainer, 'processing_class'):
             tokenizer = trainer.processing_class
             special_tokens = []
-            for token_str in ['</Silence>', '</Standby>', '</Response>']:
+            for token_str in STATE_TOKENS:
                 try:
                     token_ids = tokenizer.encode(token_str, add_special_tokens=False)
-                    if token_ids:
-                        special_tokens.append(token_ids[0])
+                    if len(token_ids) != 1:
+                        raise ValueError(f'{token_str} must be registered as a single special token')
+                    special_tokens.append(token_ids[0])
                 except Exception as e:
                     print(f"Warning: Failed to encode {token_str}: {e}")
             if not special_tokens:

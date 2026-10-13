@@ -20,6 +20,7 @@ import os
 import posixpath
 import sqlite3
 import sys
+import tempfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -32,6 +33,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from convert_streaming_video import convert_format_to_stream  # noqa: E402
 from tqdm import tqdm  # noqa: E402
+from streamo_utils.streaming import SAMPLING_VERSION, validate_fps  # noqa: E402
 
 
 VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v'}
@@ -315,9 +317,15 @@ def resolve_local_video_path(
     return None, 'missing_file'
 
 
-def _convert_to_stream_worker(args: Tuple[int, Dict[str, Any], float]) -> Tuple[int, Optional[Dict[str, Any]]]:
+def _convert_to_stream_worker(
+    args: Tuple[int, Dict[str, Any], float],
+) -> Tuple[int, Optional[Dict[str, Any]], Optional[str]]:
     idx, row, fps = args
-    return idx, convert_format_to_stream(row, fps=fps)
+    try:
+        result = convert_format_to_stream(row, fps=fps)
+        return idx, result, None if result is not None else 'Video could not be converted'
+    except (ValueError, OSError) as exc:
+        return idx, None, str(exc)
 
 
 def convert_rows_to_stream(
@@ -326,7 +334,19 @@ def convert_rows_to_stream(
     *,
     fps: float,
     num_workers: int,
+    diagnostics: Optional[Dict[str, Any]] = None,
 ) -> Tuple[int, List[int]]:
+    validate_fps(fps)
+    diagnostics = diagnostics if diagnostics is not None else {}
+    diagnostics.update({
+        'input_responses': sum(len(row.get('response', [])) for row in rows),
+        'retained_responses': 0,
+        'dropped_responses': 0,
+        'silence_frames': 0,
+        'response_frames': 0,
+        'merged_responses': 0,
+        'conversion_errors': [],
+    })
     if not rows:
         ensure_parent_dir(output_path)
         output_path.write_text('[]\n', encoding='utf-8')
@@ -341,23 +361,47 @@ def convert_rows_to_stream(
         pbar = tqdm(as_completed(futures), total=len(futures),
                     desc='Converting to stream', unit=' rows', dynamic_ncols=True)
         for future in pbar:
-            idx, result = future.result()
+            idx, result, error = future.result()
             if result is None:
                 failed_indices.append(idx)
+                diagnostics['conversion_errors'].append({
+                    'index': idx, 'video_path': rows[idx].get('video_path'), 'error': error,
+                })
+                diagnostics['dropped_responses'] += len(rows[idx].get('response', []))
             else:
                 results_by_index[idx] = result
+                metadata = result['streaming_metadata']
+                annotations = metadata['annotation_count']
+                response_frames = metadata['response_frames']
+                diagnostics['retained_responses'] += annotations
+                diagnostics['response_frames'] += response_frames
+                diagnostics['merged_responses'] += annotations - response_frames
+                diagnostics['silence_frames'] += sum(
+                    m['role'] == 'assistant' and m['content'] == '</Silence>' for m in result['messages'])
             pbar.set_postfix(ok=len(results_by_index), fail=len(failed_indices), refresh=False)
 
     sorted_indices = sorted(results_by_index)
     num_converted = len(sorted_indices)
     ensure_parent_dir(output_path)
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write('[\n')
-        for i, idx in enumerate(sorted_indices):
-            line = json.dumps(results_by_index[idx], ensure_ascii=False)
-            f.write(f'  {line}')
-            f.write(',\n' if i < len(sorted_indices) - 1 else '\n')
-        f.write(']\n')
+    # Publish only a fully serialized result; interrupted runs leave the old file intact.
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=output_path.parent,
+                                         prefix=output_path.name + '.', suffix='.tmp', delete=False) as f:
+            temporary_path = Path(f.name)
+            f.write('[\n')
+            for i, idx in enumerate(sorted_indices):
+                line = json.dumps(results_by_index[idx], ensure_ascii=False)
+                f.write(f'  {line}')
+                f.write(',\n' if i < len(sorted_indices) - 1 else '\n')
+            f.write(']\n')
+        if output_path.exists():
+            temporary_path.chmod(output_path.stat().st_mode & 0o777)
+        temporary_path.replace(output_path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    diagnostics['conversion_errors'].sort(key=lambda error: error['index'])
     results_by_index.clear()  # free memory
     return num_converted, sorted(failed_indices)
 
@@ -378,6 +422,7 @@ def _incr(mapping: Dict[str, int], key: str, delta: int = 1) -> None:
 
 
 def prepare_streamo_training_data(args: argparse.Namespace) -> Dict[str, Any]:
+    validate_fps(args.fps)
     label_root = Path(args.label_root).expanduser().resolve()
     media_root = Path(args.media_root).expanduser().resolve()
     output_raw = Path(args.output_raw).expanduser()
@@ -467,11 +512,13 @@ def prepare_streamo_training_data(args: argparse.Namespace) -> Dict[str, Any]:
             f.write(',\n' if i < len(resolved_rows) - 1 else '\n')
         f.write(']\n')
 
+    conversion_stats = {}
     num_converted, failed_indices = convert_rows_to_stream(
         resolved_rows,
         output_stream,
         fps=args.fps,
         num_workers=args.num_workers,
+        diagnostics=conversion_stats,
     )
 
     for idx in failed_indices:
@@ -494,6 +541,9 @@ def prepare_streamo_training_data(args: argparse.Namespace) -> Dict[str, Any]:
         'output_stream': str(output_stream),
         'report_json': str(report_json),
         'fps': args.fps,
+        'sampling': SAMPLING_VERSION,
+        'state_mode': 'silence_response',
+        'conversion': conversion_stats,
         'num_workers': args.num_workers,
         'label_files': len(label_files),
         'total_rows': total_rows,

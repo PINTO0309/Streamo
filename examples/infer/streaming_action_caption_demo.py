@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import IO, Dict, List, Optional, Sequence, Tuple
@@ -10,31 +11,17 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from streamo_utils.streaming import (
+    SYSTEM_PROMPT, format_seconds, iter_sampled_frames, sampling_indices, time_tag,
+)
+
 os.environ.setdefault('MIN_PIXELS', '3136')
 os.environ.setdefault('MAX_PIXELS', '100352')
 
-
-SYSTEM_PROMPT = """
-You are a helpful assistant specializing in streaming video analysis.
-You will receive input frame by frame, each labeled with absolute time intervals
-in the exact format <Xs-Ys> (e.g., <0s-1s>). Follow these rules precisely:
-
-1. Use </Silence> when:
-   - No relevant event has started, OR
-   - The current input is irrelevant to the given question.
-
-2. Use </Standby> when:
-   - An event is in progress but has not yet completed, OR
-   - The current input is relevant but the question cannot yet be answered.
-
-3. Use </Response> only when:
-   - An event has fully concluded, OR
-   - The available information is sufficient to fully answer the question.
-   Provide a complete description at this point.
-
-Do not provide partial answers or speculate beyond the given information.
-Whenever you deliver an answer, begin with </Response>.
-""".strip()
 
 DEFAULT_CAPTION_QUESTION = 'Detect and summarize each event sequence in the video.'
 STATE_SILENCE = '</Silence>'
@@ -60,12 +47,6 @@ def str2bool(value: str) -> bool:
     raise argparse.ArgumentTypeError(f'Invalid boolean value: {value}')
 
 
-def format_seconds(seconds: float) -> str:
-    if abs(seconds - round(seconds)) < 1e-9:
-        return str(int(round(seconds)))
-    return f'{seconds:.3f}'.rstrip('0').rstrip('.')
-
-
 def parse_response(response: str) -> Tuple[str, str]:
     for prefix in RESPONSE_PREFIXES:
         if response.startswith(prefix):
@@ -87,7 +68,8 @@ class VideoFrameExtractor:
         if self.original_fps <= 0:
             raise ValueError(f'Invalid FPS for video: {video_path}')
         self.duration = self.total_frames / self.original_fps
-        self.num_extracted_frames = max(1, int(self.duration * self.target_fps))
+        self.frame_indices = sampling_indices(self.total_frames, self.original_fps, self.target_fps)
+        self.num_extracted_frames = len(self.frame_indices)
 
     def get_frame_at_time(self, time_sec: float) -> Image.Image:
         frame_idx = min(int(time_sec * self.original_fps), self.total_frames - 1)
@@ -99,8 +81,8 @@ class VideoFrameExtractor:
         return Image.fromarray(frame_rgb)
 
     def get_frame_at_round(self, round_num: int) -> Image.Image:
-        time_sec = round_num / self.target_fps
-        return self.get_frame_at_time(time_sec)
+        frame = next(iter_sampled_frames(self.cap, [self.frame_indices[round_num]]))
+        return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
     def get_total_rounds(self) -> int:
         return self.num_extracted_frames
@@ -114,13 +96,12 @@ class VideoFrameExtractor:
         self.close()
 
 
-def make_user_content(round_num: int, fps: float, question: str, include_question: bool) -> str:
-    start_sec = round_num / fps
-    end_sec = (round_num + 1) / fps
-    time_tag = f'<{format_seconds(start_sec)}s-{format_seconds(end_sec)}s>\n<image>'
+def make_user_content(round_num: int, fps: float, question: str, include_question: bool,
+                      duration: Optional[float] = None) -> str:
+    interval_tag = time_tag(round_num, fps, duration) + '\n<image>'
     if include_question:
-        return f'{question}\n{time_tag}'
-    return time_tag
+        return f'{question}\n{interval_tag}'
+    return interval_tag
 
 
 def build_stream_window(
@@ -145,7 +126,7 @@ def build_stream_window(
         include_question = global_question or (round_num == question_time)
         messages.append({
             'role': 'user',
-            'content': make_user_content(round_num, fps, question, include_question),
+            'content': make_user_content(round_num, fps, question, include_question, video_extractor.duration),
         })
         return {'images': [frame], 'messages': messages}
 
@@ -155,7 +136,7 @@ def build_stream_window(
     include_question = round_num == question_time
     messages.append({
         'role': 'user',
-        'content': make_user_content(round_num, fps, question, include_question),
+        'content': make_user_content(round_num, fps, question, include_question, video_extractor.duration),
     })
     data['images'].append(frame)
 
@@ -169,7 +150,7 @@ def build_stream_window(
         include_question_start = global_question or (question_time == start_round)
         new_messages[1] = {
             'role': 'user',
-            'content': make_user_content(start_round, fps, question, include_question_start),
+            'content': make_user_content(start_round, fps, question, include_question_start, video_extractor.duration),
         }
 
         data['messages'] = new_messages
@@ -566,7 +547,7 @@ def main():
             response = run_single_infer(engine, InferRequest(**data))
             response_type, response_body = parse_response(response)
             start_sec = round_num / args.fps
-            end_sec = (round_num + 1) / args.fps
+            end_sec = min((round_num + 1) / args.fps, video_extractor.duration)
             is_new_event = response_type == STATE_RESPONSE and previous_answer != response
 
             print(

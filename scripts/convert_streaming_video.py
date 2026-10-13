@@ -43,7 +43,7 @@ Stream format output (with <stream> tokens):
     "messages": [
         {"role": "system", "content": "..."},
         {"role": "user", "content": "Question<stream>"},
-        {"role": "assistant", "content": "</Standby>"},
+        {"role": "assistant", "content": "</Silence>"},
         {"role": "user", "content": "<stream>"},
         {"role": "assistant", "content": "</Response> ..."},
         ...
@@ -69,90 +69,43 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+from streamo_utils.streaming import (
+    SAMPLING_VERSION, SYSTEM_PROMPT, interval_index, parse_seconds,
+    sampling_indices, time_tag, validate_fps,
+)
+
 IMAGE_TOKEN = '<image>'
 STREAM_TOKEN = '<stream>'
-
-# Default system prompt
-DEFAULT_SYSTEM_PROMPT = """
-You are a helpful assistant specializing in streaming video analysis. 
-You will receive input frame by frame, each labeled with absolute time intervals 
-in the exact format <Xs-Ys> (e.g., <0s-1s>). Follow these rules precisely:
-
-1. Use </Silence> when:
-   - No relevant event has started, OR
-   - The current input is irrelevant to the given question.  
-
-2. Use </Standby> when:
-   - An event is in progress but has not yet completed, OR
-   - The current input is relevant but the question cannot yet be answered.  
-
-3. Use </Response> only when:
-   - An event has fully concluded, OR
-   - The available information is sufficient to fully answer the question.
-   Provide a complete description at this point.  
-
-Do not provide partial answers or speculate beyond the given information.  
-Whenever you deliver an answer, begin with </Response>.
-"""
-
-# Response states
+DEFAULT_SYSTEM_PROMPT = SYSTEM_PROMPT
 STATE_SILENCE = "</Silence>"
-STATE_STANDBY = "</Standby>"
 STATE_RESPONSE = "</Response>"
 
 
-def get_video_frame_count(video_path: str, fps: float = 1.0) -> int:
-    """Get estimated frame count at specified fps."""
+def get_video_metadata(video_path: str) -> Tuple[int, float]:
     import cv2
     cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise ValueError(f"Cannot open video: {video_path}")
-    
-    video_fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    cap.release()
-    
-    frame_interval = max(1, int(video_fps / fps)) if fps > 0 else 1
-    return total_frames // frame_interval
+    try:
+        if not cap.isOpened():
+            raise ValueError(f"Cannot open video: {video_path}")
+        source_fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        validate_fps(source_fps)
+        if total_frames <= 0:
+            raise ValueError(f"No frames in video: {video_path}")
+        return total_frames, source_fps
+    finally:
+        cap.release()
+
+
+def get_video_frame_count(video_path: str, fps: float = 1.0) -> int:
+    total_frames, source_fps = get_video_metadata(video_path)
+    return len(sampling_indices(total_frames, source_fps, fps))
 
 
 def parse_time(time_str: Union[str, int, float, None], fps: float = 1.0) -> Optional[int]:
-    """Parse time string to frame index."""
-    if time_str is None or time_str == '':
-        return None
-    
-    if isinstance(time_str, (int, float)):
-        return int(time_str)
-    
-    time_str = str(time_str).strip()
-    if not time_str:
-        return None
-    
-    # Try integer (frame index)
-    try:
-        return int(time_str)
-    except ValueError:
-        pass
-    
-    # Try float (seconds -> frame index)
-    try:
-        return int(float(time_str) * fps)
-    except ValueError:
-        pass
-    
-    # Try timestamp (HH:MM:SS or MM:SS)
-    parts = time_str.split(':')
-    try:
-        if len(parts) == 2:
-            minutes, seconds = map(float, parts)
-            return int((minutes * 60 + seconds) * fps)
-        elif len(parts) == 3:
-            hours, minutes, seconds = map(float, parts)
-            return int((hours * 3600 + minutes * 60 + seconds) * fps)
-    except ValueError:
-        pass
-    
-    return None
+    """Parse seconds to the zero-based turn ending at or after this time."""
+    seconds = parse_seconds(time_str)
+    return None if seconds is None else interval_index(seconds, fps)
 
 
 def build_frame_states(
@@ -160,59 +113,47 @@ def build_frame_states(
     questions: List[Dict[str, Any]],
     responses: List[Dict[str, Any]],
     fps: float = 1.0,
+    duration: Optional[float] = None,
 ) -> Tuple[List[str], Dict[int, str]]:
-    """
-    Build frame states based on questions and responses.
-    
-    Returns:
-        (frame_states, question_map)
-    """
-    # Initialize all frames as silence
-    frame_states = [STATE_SILENCE] * num_frames
+    """Emit each annotation once, at the end of its containing interval."""
+    validate_fps(fps)
+    duration = num_frames / fps if duration is None else duration
     question_map = {}
-    
-    # Process questions
-    # time=5 means the question appears at <4s-5s>, which is frame index 4 (time-1)
+    response_map = {}
+
+    def position(seconds):
+        index = interval_index(seconds, fps, duration)
+        if index >= num_frames:
+            raise ValueError(f'Time {seconds}s has no output frame')
+        return index
+
     for q in questions:
-        content = q.get('content', '')
-        time = parse_time(q.get('time'), fps)
-        if content and time is not None:
-            # time=5 -> frame index 4 (corresponds to <4s-5s>)
-            frame_idx = max(0, time - 1) if time > 0 else 0
-            if 0 <= frame_idx < num_frames:
-                question_map[frame_idx] = content
-    
-    # Process responses
-    # time values represent seconds, frame index = time - 1
-    # e.g., st_time=5, end_time=7 means standby at frames 4,5,6 (<4s-5s>, <5s-6s>, <6s-7s>)
-    #       response at frame 7 (<7s-8s>)
+        seconds = parse_seconds(q.get('time'))
+        if q.get('content'):
+            index = position(0 if seconds is None else seconds)
+            question_map[index] = '\n'.join(filter(None, [question_map.get(index), q['content']]))
+
     for resp in responses:
-        content = resp.get('content', '')
-        st_time = parse_time(resp.get('st_time'), fps)
-        end_time = parse_time(resp.get('end_time'), fps)
-        time = parse_time(resp.get('time'), fps)
-        
-        if st_time is not None and end_time is not None:
-            # Convert to frame indices: time=5 -> frame 4
-            st_frame = max(0, st_time - 1) if st_time > 0 else 0
-            end_frame = max(0, end_time - 1) if end_time > 0 else 0
-            
-            # Standby during [st_frame, end_frame]
-            for i in range(st_frame, min(end_frame + 1, num_frames)):
-                frame_states[i] = STATE_STANDBY
-            
-            # Response at end_frame + 1
-            resp_idx = end_frame + 1
-            if 0 <= resp_idx < num_frames and content:
-                frame_states[resp_idx] = f"{STATE_RESPONSE} {content}"
-                
-        elif time is not None:
-            # Direct response: time=8 -> frame 7 (<7s-8s>)
-            frame_idx = max(0, time - 1) if time > 0 else 0
-            if 0 <= frame_idx < num_frames and content:
-                frame_states[frame_idx] = f"{STATE_RESPONSE} {content}"
-    
-    return frame_states, question_map
+        content = resp.get('content')
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError('Response content must not be empty')
+        start = parse_seconds(resp.get('st_time'))
+        end = parse_seconds(resp.get('end_time'))
+        direct = parse_seconds(resp.get('time'))
+        if start is not None and end is not None:
+            if start > end:
+                raise ValueError(f'Event starts after its end: {start} > {end}')
+            seconds = end
+        elif direct is not None:
+            seconds = direct
+        else:
+            raise ValueError('Response requires st_time/end_time or time')
+        response_map.setdefault(position(seconds), []).append(content)
+
+    states = [STATE_SILENCE] * num_frames
+    for index, contents in response_map.items():
+        states[index] = STATE_RESPONSE + ' ' + '\n'.join(contents)
+    return states, question_map
 
 
 def convert_format_to_stream(
@@ -237,12 +178,13 @@ def convert_format_to_stream(
         "messages": [
             {"role": "system", "content": "..."},
             {"role": "user", "content": "Question<stream>"},
-            {"role": "assistant", "content": "</Standby>"},
+            {"role": "assistant", "content": "</Silence>"},
             ...
         ],
         "videos": ["/path/to/video.mp4"]
     }
     """
+    validate_fps(fps)
     # Get video path
     video_path = data.get('video_path', '')
     if not video_path:
@@ -260,7 +202,9 @@ def convert_format_to_stream(
     
     # Get frame count
     try:
-        num_frames = get_video_frame_count(video_path, fps)
+        total_frames, source_fps = get_video_metadata(video_path)
+        duration = total_frames / source_fps
+        num_frames = len(sampling_indices(total_frames, source_fps, fps))
     except Exception as e:
         print(f"Warning: Cannot read video {video_path}: {e}")
         return None
@@ -275,16 +219,14 @@ def convert_format_to_stream(
     
     # Build frame states
     frame_states, question_map = build_frame_states(
-        num_frames, questions, responses, fps
+        num_frames, questions, responses, fps, duration
     )
     
-    # Set default question at frame 0 if no question specified
-    if 0 not in question_map:
-        if questions and questions[0].get('content'):
-            question_map[0] = questions[0]['content']
-        else:
-            question_map[0] = default_question
-    
+    # Only supply a default when there is no timed question. Do not move a
+    # future question to the beginning of the video.
+    if not questions:
+        question_map[0] = default_question
+
     # Build messages
     messages = []
     
@@ -297,11 +239,11 @@ def convert_format_to_stream(
     # Frame-by-frame messages with <stream> token
     for i in range(num_frames):
         # User message with time format: <Xs-Ys>
-        time_tag = f"<{i}s-{i+1}s>"
+        interval_tag = time_tag(i, fps, duration)
         if i in question_map:
-            user_content = f"{question_map[i]}\n{time_tag}\n{STREAM_TOKEN}"
+            user_content = f"{question_map[i]}\n{interval_tag}\n{STREAM_TOKEN}"
         else:
-            user_content = f"{time_tag}\n{STREAM_TOKEN}"
+            user_content = f"{interval_tag}\n{STREAM_TOKEN}"
         
         messages.append({
             "role": "user",
@@ -316,7 +258,15 @@ def convert_format_to_stream(
     
     result = {
         "messages": messages,
-        "videos": [video_path]
+        "videos": [video_path],
+        "streaming_metadata": {
+            "fps": fps,
+            "sampling": SAMPLING_VERSION,
+            "state_mode": "silence_response",
+            "duration": duration,
+            "annotation_count": len(responses),
+            "response_frames": sum(state != STATE_SILENCE for state in frame_states),
+        },
     }
     
     # Preserve metadata

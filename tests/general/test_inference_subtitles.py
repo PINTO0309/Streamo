@@ -1,5 +1,6 @@
 import importlib.util
 import unittest
+import tempfile
 from pathlib import Path
 
 
@@ -21,18 +22,25 @@ class TestInferenceSubtitles(unittest.TestCase):
     def setUpClass(cls):
         cls.module = load_inference_module()
 
-    def test_frame_sampling_time_uses_target_fps(self):
-        extractor = object.__new__(self.module.VideoFrameExtractor)
-        extractor.cap = None
-        for fps in (1.0, 3.0, 5.0, 10.0, 15.0):
-            with self.subTest(fps=fps):
-                extractor.target_fps = fps
-                sampled_times = []
-                extractor.get_frame_at_time = lambda time_sec: sampled_times.append(time_sec)
-
-                extractor.get_frame_at_round(30)
-
-                self.assertEqual(sampled_times, [30 / fps])
+    def test_frame_sampling_uses_interval_end_at_target_fps(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = str(Path(tmp_dir) / 'frames.avi')
+            cv2, np = self.module.cv2, self.module.np
+            writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'MJPG'), 30, (32, 32))
+            self.assertTrue(writer.isOpened())
+            for index in range(60):
+                writer.write(np.full((32, 32, 3), index * 4, dtype=np.uint8))
+            writer.release()
+            # The second target interval ends at 2 / fps. At 30 source FPS,
+            # these are the last source frames before each interval's end.
+            for fps, source_index in ((1, 59), (3, 19), (5, 11), (10, 5), (15, 3)):
+                with self.subTest(fps=fps):
+                    extractor = self.module.VideoFrameExtractor(path, target_fps=fps)
+                    try:
+                        frame = np.asarray(extractor.get_frame_at_round(1))
+                        self.assertAlmostEqual(float(frame.mean()), source_index * 4, delta=2)
+                    finally:
+                        extractor.close()
 
     def test_user_time_tag_uses_target_fps(self):
         self.assertEqual(
@@ -53,7 +61,7 @@ class TestInferenceSubtitles(unittest.TestCase):
                 question=None,
                 include_question=False,
             ),
-            '<0.067s-0.133s>\n<image>',
+            '<0.066666667s-0.133333333s>\n<image>',
         )
 
     def test_stream_window_uses_extractor_fps_in_time_tag(self):

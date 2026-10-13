@@ -11,9 +11,9 @@ Input format (using <stream> token):
     "messages": [
         {"role": "system", "content": "..."},
         {"role": "user", "content": "Find all events<stream>"},
-        {"role": "assistant", "content": "</Standby>"},
+        {"role": "assistant", "content": "</Silence>"},
         {"role": "user", "content": "<stream>"},
-        {"role": "assistant", "content": "</Standby>"},
+        {"role": "assistant", "content": "</Silence>"},
         ...
     ],
     "videos": ["/path/to/video.mp4"]
@@ -24,9 +24,9 @@ Output format (converted):
     "messages": [
         {"role": "system", "content": "..."},
         {"role": "user", "content": "Find all events<image>"},
-        {"role": "assistant", "content": "</Standby>"},
+        {"role": "assistant", "content": "</Silence>"},
         {"role": "user", "content": "<image>"},
-        {"role": "assistant", "content": "</Standby>"},
+        {"role": "assistant", "content": "</Silence>"},
         ...
     ],
     "images": [PIL.Image, PIL.Image, ...]  # In-memory PIL images or file paths
@@ -54,6 +54,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from streamo_utils.streaming import SAMPLING_VERSION, iter_sampled_frames, sampling_indices, validate_fps
 from swift.utils import get_logger
 from .core import RowPreprocessor, MessagesPreprocessor
 
@@ -443,7 +444,7 @@ class VideoFrameExtractor:
         enable_memory_cache: bool = True,  # Enable in-memory caching for repeated access
         frame_tolerance: int = 1,  # Tolerance in frames for count mismatch (at current fps)
     ):
-        self.fps = fps
+        self.fps = validate_fps(fps)
         self.max_frames = max_frames
         self.output_dir = output_dir
         self.use_cache = use_cache
@@ -454,7 +455,7 @@ class VideoFrameExtractor:
     
     def _get_cache_key(self, video_path: str) -> str:
         """Generate cache key based on video path and extraction parameters."""
-        return f"{video_path}|fps={self.fps}|max={self.max_frames}"
+        return f"{video_path}|fps={self.fps}|max={self.max_frames}|sampling={SAMPLING_VERSION}"
     
     def _get_from_cache(self, video_path: str) -> Optional[List[Image.Image]]:
         """Try to get frames from memory cache using LRU cache."""
@@ -498,110 +499,25 @@ class VideoFrameExtractor:
         
         return frames
     
+    def _sample_indices(self, cap):
+        indices = sampling_indices(
+            int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), cap.get(cv2.CAP_PROP_FPS), self.fps)
+        return indices[:self.max_frames] if self.max_frames else indices
+
     def _extract_to_memory_optimized(self, video_path: str) -> List[Image.Image]:
-        """
-        Extract frames directly to memory using optimized seek-based approach.
-        
-        Instead of reading all frames sequentially and skipping unwanted ones,
-        this method directly seeks to target frame positions, which is much faster
-        for low fps extraction (e.g., 1 fps from 30 fps video).
-        
-        For better seek accuracy on compressed videos (H.264), we seek to slightly
-        before the target and read forward to ensure we get the right frame.
-        """
         cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise ValueError(f"Cannot open video: {video_path}")
-        
         try:
-            video_fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            
-            # Handle invalid video metadata
-            if video_fps <= 0 or total_frames <= 0:
-                logger.warning(f"Invalid video metadata for {video_path}, falling back to sequential read")
-                return self._extract_to_memory_sequential(cap)
-            
-            # Calculate frame interval
-            frame_interval = max(1, int(video_fps / self.fps)) if self.fps > 0 else 1
-            
-            frames = []
-            target_frame = 0
-            
-            # For accurate seeking on compressed videos, we use a hybrid approach:
-            # 1. Try direct seek first
-            # 2. If seek seems inaccurate (position doesn't match), fall back to sequential
-            seek_accurate = True
-            
-            while target_frame < total_frames:
-                if seek_accurate:
-                    # Try to seek directly
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
-                    
-                    # Verify seek accuracy by checking position
-                    actual_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-                    if abs(actual_pos - target_frame) > frame_interval // 2:
-                        # Seek is inaccurate, fall back to sequential for remaining frames
-                        logger.debug(f"Seek inaccurate at frame {target_frame} (got {actual_pos}), switching to sequential")
-                        seek_accurate = False
-                        # Reset to beginning and skip to current position
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        for _ in range(target_frame):
-                            cap.read()
-                
-                ret, frame = cap.read()
-                
-                if not ret:
-                    break
-                
-                # Convert BGR to RGB and create PIL Image
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                pil_image = Image.fromarray(frame_rgb)
-                frames.append(pil_image)
-                
-                if self.max_frames and len(frames) >= self.max_frames:
-                    break
-                
-                if seek_accurate:
-                    target_frame += frame_interval
-                else:
-                    # Sequential mode: skip frames
-                    for _ in range(frame_interval - 1):
-                        ret, _ = cap.read()
-                        if not ret:
-                            break
-                    target_frame += frame_interval
-            
-            return frames
-            
+            if not cap.isOpened():
+                raise ValueError(f'Cannot open video: {video_path}')
+            return [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                    for frame in iter_sampled_frames(cap, self._sample_indices(cap))]
         finally:
             cap.release()
-    
+
     def _extract_to_memory_sequential(self, cap: cv2.VideoCapture) -> List[Image.Image]:
-        """Fallback sequential extraction when seek is not reliable."""
-        video_fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_interval = max(1, int(video_fps / self.fps)) if self.fps > 0 and video_fps > 0 else 1
-        
-        frames = []
-        frame_idx = 0
-        
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            if frame_idx % frame_interval == 0:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                pil_image = Image.fromarray(frame_rgb)
-                frames.append(pil_image)
-                
-                if self.max_frames and len(frames) >= self.max_frames:
-                    break
-            
-            frame_idx += 1
-        
-        return frames
-    
+        return [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                for frame in iter_sampled_frames(cap, self._sample_indices(cap), seek=False)]
+
     def _extract_to_files(self, video_path: str) -> List[str]:
         """Extract frames to disk files using optimized seek and multi-threading.
         
@@ -658,96 +574,14 @@ class VideoFrameExtractor:
             
             try:
                 video_fps = cap.get(cv2.CAP_PROP_FPS)
-                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                frame_interval = max(1, int(video_fps / self.fps)) if self.fps > 0 else 1
-                
-                # Collect frames to save
-                frames_to_save = []  # List of (frame_path, frame_data)
+                frames_to_save = []
                 frame_paths = []
-                saved_idx = 0
-                
-                # Use optimized seek if metadata is valid
-                use_seek = video_fps > 0 and total_frames > 0
-                
-                if use_seek:
-                    # Optimized: seek directly to target frames with accuracy check
-                    target_frame = 0
-                    seek_accurate = True
-                    sequential_frame_idx = 0  # Counter for sequential mode
-                    
-                    while target_frame < total_frames:
-                        if seek_accurate:
-                            cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
-                            actual_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-                            if abs(actual_pos - target_frame) > frame_interval // 2:
-                                logger.debug(f"Seek inaccurate at frame {target_frame}, switching to sequential")
-                                seek_accurate = False
-                                # Reset and read sequentially to target position
-                                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                                sequential_frame_idx = 0
-                                # Skip to current target frame
-                                while sequential_frame_idx < target_frame:
-                                    ret, _ = cap.read()
-                                    if not ret:
-                                        break
-                                    sequential_frame_idx += 1
-                        
-                        ret, frame = cap.read()
-                        if not ret:
-                            break
-                        
-                        if seek_accurate:
-                            # In seek mode, we directly jumped to target_frame
-                            current_frame = target_frame
-                        else:
-                            # In sequential mode, track current position
-                            current_frame = sequential_frame_idx
-                            sequential_frame_idx += 1
-                        
-                        frame_path = os.path.join(frame_dir, f"frame_{saved_idx:06d}.png")
-                        frame_paths.append(frame_path)
-                        
-                        if not os.path.exists(frame_path):
-                            frames_to_save.append((frame_path, frame.copy()))
-                        
-                        saved_idx += 1
-                        
-                        if self.max_frames and saved_idx >= self.max_frames:
-                            break
-                        
-                        # Calculate next target frame
-                        if seek_accurate:
-                            target_frame += frame_interval
-                        else:
-                            # In sequential mode, skip frames to reach next target
-                            next_target = current_frame + frame_interval
-                            while sequential_frame_idx < next_target:
-                                ret, _ = cap.read()
-                                if not ret:
-                                    break
-                                sequential_frame_idx += 1
-                            target_frame = next_target
-                else:
-                    # Fallback: sequential read when metadata is invalid
-                    frame_idx = 0
-                    while True:
-                        ret, frame = cap.read()
-                        if not ret:
-                            break
-                        
-                        if frame_idx % frame_interval == 0:
-                            frame_path = os.path.join(frame_dir, f"frame_{saved_idx:06d}.png")
-                            frame_paths.append(frame_path)
-                            
-                            if not os.path.exists(frame_path):
-                                frames_to_save.append((frame_path, frame.copy()))
-                            
-                            saved_idx += 1
-                            
-                            if self.max_frames and saved_idx >= self.max_frames:
-                                break
-                        
-                        frame_idx += 1
+                indices = self._sample_indices(cap)
+                for saved_idx, frame in enumerate(iter_sampled_frames(cap, indices)):
+                    frame_path = os.path.join(frame_dir, f"frame_{saved_idx:06d}.png")
+                    frame_paths.append(frame_path)
+                    if not self.use_cache or not os.path.exists(frame_path):
+                        frames_to_save.append((frame_path, frame.copy()))
             finally:
                 cap.release()
             
@@ -778,6 +612,7 @@ class VideoFrameExtractor:
                     f.write(f"frames={len(frame_paths)}\n")
                     f.write(f"video_fps={video_fps}\n")
                     f.write(f"extraction_fps={self.fps}\n")
+                    f.write(f"sampling={SAMPLING_VERSION}\n")
             
             logger.info(
                 f"Extracted {len(frame_paths)} frames from {video_path} "
@@ -796,8 +631,7 @@ class VideoFrameExtractor:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
         
-        frame_interval = max(1, int(video_fps / self.fps)) if self.fps > 0 else 1
-        estimated = total_frames // frame_interval
+        estimated = len(sampling_indices(total_frames, video_fps, self.fps))
         
         if self.max_frames:
             return min(estimated, self.max_frames)
@@ -816,7 +650,7 @@ class StreamingVideoPreprocessor(RowPreprocessor):
         "messages": [
             {"role": "system", "content": "..."},
             {"role": "user", "content": "Find all events<stream>"},
-            {"role": "assistant", "content": "</Standby>"},
+            {"role": "assistant", "content": "</Silence>"},
             {"role": "user", "content": "<stream>"},
             {"role": "assistant", "content": "</Response> ..."},
             ...
@@ -829,7 +663,7 @@ class StreamingVideoPreprocessor(RowPreprocessor):
         "messages": [
             {"role": "system", "content": "..."},
             {"role": "user", "content": "Find all events<image>"},
-            {"role": "assistant", "content": "</Standby>"},
+            {"role": "assistant", "content": "</Silence>"},
             {"role": "user", "content": "<image>"},
             {"role": "assistant", "content": "</Response> ..."},
             ...
@@ -867,7 +701,8 @@ class StreamingVideoPreprocessor(RowPreprocessor):
             columns: Column mapping
         """
         super().__init__(columns=columns, **kwargs)
-        self.fps = fps
+        self._version = SAMPLING_VERSION
+        self.fps = validate_fps(fps)
         self.max_frames = max_frames
         self.frame_output_dir = frame_output_dir
         self.save_frames = save_frames
@@ -963,6 +798,13 @@ class StreamingVideoPreprocessor(RowPreprocessor):
                 # Not streaming data, return as-is
                 return row
             
+            metadata = row.get('streaming_metadata') or {}
+            if metadata:
+                if metadata.get('fps') != self.fps:
+                    raise ValueError(f"Dataset FPS {metadata.get('fps')} != extraction FPS {self.fps}")
+                if metadata.get('sampling') != SAMPLING_VERSION:
+                    raise ValueError(f"Unsupported sampling convention: {metadata.get('sampling')}")
+
             # Get video path
             video_path = self._get_video_path(row)
             if not video_path:
@@ -993,11 +835,12 @@ class StreamingVideoPreprocessor(RowPreprocessor):
             # Validate frame count with tolerance
             frame_diff = len(frame_paths) - stream_count
             
-            if abs(frame_diff) > self.frame_tolerance:
+            tolerance = 0 if metadata else self.frame_tolerance
+            if abs(frame_diff) > tolerance:
                 logger.warning(
                     f"Frame count mismatch: extracted {len(frame_paths)} frames but "
                     f"found {stream_count} <stream> tokens in {video_path}. "
-                    f"Difference ({abs(frame_diff)}) exceeds tolerance ({self.frame_tolerance}). Discarding sample."
+                    f"Difference ({abs(frame_diff)}) exceeds tolerance ({tolerance}). Discarding sample."
                 )
                 return None
             

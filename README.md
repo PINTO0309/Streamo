@@ -105,10 +105,10 @@ Backend notes:
 
 How to read the output:
 
-- `Total rounds: N` shows how many 1-second rounds will be processed for the selected video and FPS.
+- `Total rounds: N` shows how many intervals of `1 / target_fps` seconds will be processed for the selected video and FPS.
 - `=====Round i=====` and `Answer: ...` show the model output for each round.
-- `</Silence>` means no relevant event has started yet, or the current frame is irrelevant.
-- `</Standby>` means the event is still unfolding and the script should wait before giving a final answer.
+- `</Silence>` means there is nothing new to report, including when an event is still in progress.
+- `</Standby>` is recognized when reading legacy model output; new training data uses `</Silence>` for waiting.
 - `</Response>` means the event is complete, or the model now has enough information to answer fully.
 - After the run, one JSON line is appended to `./test_sample_video.jsonl` with `video_path`, `target_fps`, and the per-round outputs.
 
@@ -156,11 +156,7 @@ During training, the registered streaming-video preprocessor:
 4. replaces `<stream>` with `<image>`,
 5. stores or reuses cached frames from disk.
 
-`special_token_v1.txt` must stay aligned with the labels used in the dataset:
-
-- `</Silence>`
-- `</Standby>`
-- `</Response>`
+Generated data uses two states: `</Silence>` (nothing to report yet, including ongoing events) and `</Response>` (a completed answer). The converter never emits `</Standby>`. Keep the unused Standby entry in `special_token_v1.txt` when preserving existing checkpoint token IDs. The streaming loss targets Silence and Response as its state tokens.
 
 ### Raw Annotation Format
 
@@ -188,12 +184,18 @@ Field semantics implemented by `scripts/convert_streaming_video.py`:
 | Field | Description |
 |-------|-------------|
 | `video_path` | Can be an absolute path, or a relative path resolved with `--video-prefix`. |
-| `question.time` | The question is injected at frame `max(0, time - 1)`. For example, `"5"` appears in the user turn for `<4s-5s>`. |
-| `response.st_time` | Start of an event span. The sample is labeled `</Standby>` beginning at frame `max(0, st_time - 1)`. |
-| `response.end_time` | End of an event span. `</Standby>` continues through frame `max(0, end_time - 1)`, and the final answer is emitted on the next frame. |
-| `response.time` | Instant-response mode. If `st_time` and `end_time` are not used, the answer is emitted directly at frame `max(0, time - 1)`. |
+| `question.time` | Seconds; insert at interval `max(0, ceil(time * fps) - 1)`. Future questions are not copied to the first turn. |
+| `response.st_time` | Event start, used to validate the span. No Standby interval is written. |
+| `response.end_time` | Emit once at the end of the containing interval: `max(0, ceil(end_time * fps) - 1)`. |
+| `response.time` | Direct response time when a start/end pair is absent; uses the same interval-end rule. |
 
-Time values are parsed as integers, floats, `MM:SS`, or `HH:MM:SS`, then mapped to frame indices using the selected `--fps`.
+Numbers, numeric strings, `MM:SS`, and `HH:MM:SS` all represent seconds. Invalid times, reversed spans, and responses beyond the video duration are reported as conversion errors. Multiple responses in one interval are joined with newlines; all other intervals emit `</Silence>`.
+
+With `--fps 4.0`, intervals start at `<0s-0.25s>`. An exact 15-second video has 60 turns, and an answer at `end_time=15.0` belongs to `<14.75s-15s>`. A final partial interval is clipped to the actual duration.
+
+Conversion, training, and inference share the `interval_end_v1` sampling convention: choose the latest source frame before each interval ends. Low-FPS sources reuse the latest frame. This assumes constant-frame-rate metadata; invalid FPS/frame counts are rejected. Each sample records its FPS and sampling convention in `streaming_metadata`, and preprocessing checks for mismatches.
+
+Regenerate older JSON files because both the response boundary rule and source frame selection have changed. Cache keys include the sampling version to avoid reusing old frames. The preparation report's `conversion` section counts input/retained/dropped responses, Silence/Response turns, merged responses, and conversion errors. Train with `STREAMING_DATASET_FPS=4.0`; `train.sh` defaults to 4 FPS and a new `frames_interval_end_fps4` cache directory.
 
 ### Stream-Format Training Data
 
@@ -206,7 +208,7 @@ Time values are parsed as integers, floats, `MM:SS`, or `HH:MM:SS`, then mapped 
     {"role": "user", "content": "Your question\n<0s-1s>\n<stream>"},
     {"role": "assistant", "content": "</Silence>"},
     {"role": "user", "content": "<1s-2s>\n<stream>"},
-    {"role": "assistant", "content": "</Standby>"},
+    {"role": "assistant", "content": "</Silence>"},
     {"role": "user", "content": "<2s-3s>\n<stream>"},
     {"role": "assistant", "content": "</Response> Your answer here"}
   ],
@@ -327,8 +329,8 @@ The new preparation script already writes stream-format JSON. `to-image` remains
 
 | Token | Description |
 |-------|-------------|
-| `</Silence>` | No relevant event has started, or the current input is irrelevant to the question. |
-| `</Standby>` | The event is in progress, or the current information is not yet sufficient to answer. |
+| `</Silence>` | Nothing new to report, including ongoing events and insufficient information. |
+| `</Standby>` | Legacy token retained for checkpoint compatibility; not emitted in generated training data. |
 | `</Response>` | The event has finished, or the available information is now sufficient to answer. |
 
 ### Advanced: Multiple Datasets
