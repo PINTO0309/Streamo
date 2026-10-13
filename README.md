@@ -147,14 +147,31 @@ The current registration in `swift/plugin/streaming_dataset.py` points `streamin
 - `STREAMING_DATASET_PATH`
 - `STREAMING_FRAME_DIR`
 - `STREAMING_DATASET_FPS`
+- `STREAMING_FRAME_MAX_WIDTH` (default: `640`; `0` disables resizing)
 
 During training, the registered streaming-video preprocessor:
 
 1. loads the stream-format JSON,
 2. finds `<stream>` tokens in `messages`,
-3. extracts video frames at the configured FPS,
+3. extracts video frames at the configured FPS and downsizes them to the maximum width while preserving aspect ratio,
 4. replaces `<stream>` with `<image>`,
 5. stores or reuses cached frames from disk.
+
+`bash train.sh` downsizes frames wider than 640 before saving PNGs. For example, 1280×720 becomes 640×360. Frames at or below the width limit are never upscaled, and the proportional height is rounded to the nearest integer. Use `STREAMING_FRAME_MAX_WIDTH=480 bash train.sh` for a different limit, or `STREAMING_FRAME_MAX_WIDTH=0 bash train.sh` to save the original resolution.
+
+Both memory and disk cache keys distinguish the resize settings, so frames cached at the original resolution or another width are not reused. Frames are extracted again as needed after a setting change. You do not need to recreate the source videos or `stream_format.json`; the 4 FPS timestamps and frame counts stay the same.
+
+To save resized images and a JSON file containing their paths before training:
+
+```bash
+python scripts/convert_streaming_video.py to-image \
+  --input ./dataset/stream/stream_format.json \
+  --output ./dataset/stream/image_format.json \
+  --frame-dir ./dataset/stream/frames_interval_end_fps4 \
+  --fps 4.0 --max-width 640 --num-workers 8
+```
+
+The `to-image` option `--max-width` also defaults to 640; use `0` to disable resizing. `scripts/probe_streaming_fps.py` accepts the same option for token length measurements, defaulting to `STREAMING_FRAME_MAX_WIDTH` or 640 when unset. For the Python APIs `VideoFrameExtractor`, `StreamingVideoPreprocessor`, and `register_streaming_video_dataset`, pass `max_width=640`; omitting it preserves the original resolution for compatibility.
 
 Generated data uses two states: `</Silence>` (nothing to report yet, including ongoing events) and `</Response>` (a completed answer). The converter never emits `</Standby>`. Keep the unused Standby entry in `special_token_v1.txt` when preserving existing checkpoint token IDs. The streaming loss targets Silence and Response as its state tokens.
 

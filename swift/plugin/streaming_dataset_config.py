@@ -4,6 +4,7 @@ import os
 DEFAULT_GENERATED_DATASET_PATH = './dataset/stream/stream_format.json'
 DEFAULT_EXAMPLE_DATASET_PATH = './dataset/example/stream_format.json'
 DEFAULT_FRAME_OUTPUT_DIR = './dataset/stream/frames'
+DEFAULT_FRAME_MAX_WIDTH = 640
 DEFAULT_DATASET_FPS = 1.0
 DEFAULT_ARCHIVE_CACHE_DIR = './dataset/stream/archive_cache'
 DEFAULT_VIDEO_CACHE_DIR = './dataset/stream/video_cache'
@@ -41,6 +42,17 @@ def resolve_streaming_frame_dir() -> str:
 def resolve_streaming_dataset_fps() -> float:
     value = _env_get('STREAMING_DATASET_FPS', 'STREAM_DATASET_FPS')
     return float(value or str(DEFAULT_DATASET_FPS))
+
+
+def resolve_streaming_frame_max_width() -> int:
+    value = _env_get('STREAMING_FRAME_MAX_WIDTH')
+    try:
+        max_width = int(value or str(DEFAULT_FRAME_MAX_WIDTH))
+    except ValueError as exc:
+        raise ValueError('STREAMING_FRAME_MAX_WIDTH must be a non-negative integer (0 disables resizing)') from exc
+    if max_width < 0:
+        raise ValueError('STREAMING_FRAME_MAX_WIDTH must be a non-negative integer (0 disables resizing)')
+    return max_width
 
 
 def resolve_streaming_enable_archive_resolution() -> bool:

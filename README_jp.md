@@ -142,14 +142,31 @@ backend ごとの差分:
 - `STREAMING_DATASET_PATH`
 - `STREAMING_FRAME_DIR`
 - `STREAMING_DATASET_FPS`
+- `STREAMING_FRAME_MAX_WIDTH`（既定: `640`、`0` で縮小を無効化）
 
 学習時には、登録された streaming-video preprocessor が次を実行します。
 
 1. stream-format JSON を読み込む
 2. `messages` 内の `<stream>` トークンを探す
-3. 設定された FPS で動画フレームを抽出する
+3. 設定された FPS で動画フレームを抽出し、幅の上限に合わせて縦横比を保って縮小する
 4. `<stream>` を `<image>` に置き換える
 5. 抽出済みフレームをディスクに保存または再利用する
+
+`bash train.sh` では、幅が640を超えるフレームをPNG保存前に縮小します。たとえば1280×720は640×360になります。幅640以下のフレームは拡大せず、高さは縦横比に合わせて最も近い整数に丸めます。別の上限を使う場合は `STREAMING_FRAME_MAX_WIDTH=480 bash train.sh`、元の解像度で保存する場合は `STREAMING_FRAME_MAX_WIDTH=0 bash train.sh` を指定してください。
+
+サイズ設定はメモリ・ディスク両方のキャッシュキーに含まれ、元の解像度や別の幅で作ったキャッシュとは区別されます。設定変更後は必要なフレームが自動的に再抽出されます。元動画や `stream_format.json` の作り直しは不要で、4 FPSの抽出時刻・フレーム数も変わりません。
+
+学習前に縮小画像と画像パス付きJSONを作ることもできます。
+
+```bash
+python scripts/convert_streaming_video.py to-image \
+  --input ./dataset/stream/stream_format.json \
+  --output ./dataset/stream/image_format.json \
+  --frame-dir ./dataset/stream/frames_interval_end_fps4 \
+  --fps 4.0 --max-width 640 --num-workers 8
+```
+
+`to-image` の `--max-width` も既定は640、`0` で無効です。`scripts/probe_streaming_fps.py` のトークン数測定にも同じ `--max-width` を指定できます（既定は `STREAMING_FRAME_MAX_WIDTH`、未設定なら640）。Python APIの `VideoFrameExtractor`、`StreamingVideoPreprocessor`、`register_streaming_video_dataset` では `max_width=640` を渡してください。Python APIでは互換性のため省略時は元の解像度を維持します。
 
 生成データは `</Silence>`（報告なし・イベント進行中）と `</Response>`（確定した応答）の2状態を使います。`</Standby>` は生成しません。既存チェックポイントのトークンIDを維持するため、`special_token_v1.txt` に未使用の `</Standby>` が残っていても問題ありません。損失関数の状態トークンはSilence／Responseの2種です。
 

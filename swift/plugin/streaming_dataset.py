@@ -23,12 +23,14 @@ from swift.plugin.streaming_dataset_config import (
     resolve_streaming_enable_archive_resolution,
     resolve_streaming_enable_memory_cache,
     resolve_streaming_frame_dir,
+    resolve_streaming_frame_max_width,
     resolve_streaming_video_cache_dir,
 )
 
 
 DATASET_PATH = resolve_streaming_dataset_path()
 FRAME_OUTPUT_DIR = resolve_streaming_frame_dir()
+FRAME_MAX_WIDTH = resolve_streaming_frame_max_width()
 DATASET_FPS = resolve_streaming_dataset_fps()
 ENABLE_MEMORY_CACHE = resolve_streaming_enable_memory_cache()
 
@@ -56,6 +58,7 @@ register_streaming_video_dataset(
     max_frames=None,  # No limit
     save_frames=True,  # Enable disk caching for efficiency (recommended for multi-epoch training)
     frame_output_dir=FRAME_OUTPUT_DIR,  # Frame cache directory
+    max_width=FRAME_MAX_WIDTH,
     enable_memory_cache=ENABLE_MEMORY_CACHE,
     video_resolver=video_resolver,
 )
@@ -63,5 +66,6 @@ register_streaming_video_dataset(
 print(
     'Registered streaming_video dataset with optimized frame extraction '
     f'(dataset_path={DATASET_PATH}, frame_output_dir={FRAME_OUTPUT_DIR}, fps={DATASET_FPS}, '
+    f'max_width={FRAME_MAX_WIDTH or "original"}, '
     f'memory_cache={"enabled" if ENABLE_MEMORY_CACHE else "disabled"}, '
     f'archive_resolution={"enabled" if video_resolver is not None else "disabled"})')

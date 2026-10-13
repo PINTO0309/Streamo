@@ -29,6 +29,7 @@ def register_streaming_video_dataset(
     num_workers: int = 8,  # Number of threads for parallel frame saving
     enable_memory_cache: bool = False,  # Enable in-memory LRU cache
     video_resolver: Optional[ArchiveVideoResolver] = None,
+    max_width: Optional[int] = None,
     **kwargs
 ) -> DatasetMeta:
     """
@@ -44,6 +45,7 @@ def register_streaming_video_dataset(
         num_workers: Number of threads for parallel frame saving
         enable_memory_cache: Enable in-memory LRU cache for repeated access (default: False)
         video_resolver: Optional resolver for archive-backed logical video paths
+        max_width: Maximum extracted frame width, preserving aspect ratio; None/0 disables resizing
         **kwargs: Additional DatasetMeta arguments
 
     Returns:
@@ -57,6 +59,7 @@ def register_streaming_video_dataset(
         num_workers=num_workers,
         enable_memory_cache=enable_memory_cache,
         video_resolver=video_resolver,
+        max_width=max_width,
     )
 
     meta = DatasetMeta(

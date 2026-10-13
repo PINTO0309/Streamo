@@ -113,11 +113,13 @@ def measure_lengths(
     *,
     fps: float,
     frame_cache_root: Path,
+    max_width: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     from swift.llm.dataset.preprocessor.streaming_video import StreamingVideoPreprocessor
 
     cache_dir = frame_cache_root / fps_label(fps)
-    preprocessor = StreamingVideoPreprocessor(fps=fps, frame_output_dir=str(cache_dir), save_frames=True)
+    preprocessor = StreamingVideoPreprocessor(
+        fps=fps, frame_output_dir=str(cache_dir), save_frames=True, max_width=max_width)
     measurements = []
     for index, stream_row in rows:
         processed = preprocessor.preprocess(stream_row)
@@ -224,6 +226,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument('--indices', nargs='*', help='Specific raw row indices to measure, overriding --top-k.')
     parser.add_argument('--no-exact', action='store_true', help='Only compute stream-token counts; skip template.encode.')
     parser.add_argument('--frame-cache-root', type=Path, default=Path('dataset/stream/fps_probe_frames'))
+    parser.add_argument('--max-width', type=int, default=os.environ.get('STREAMING_FRAME_MAX_WIDTH') or '640',
+                        help='Maximum extracted frame width; defaults to STREAMING_FRAME_MAX_WIDTH or 640; 0 disables resizing')
     parser.add_argument('--output-json', type=Path, default=Path('dataset/stream/fps_probe_report.json'))
     parser.add_argument('--write-best-stream-format', type=Path)
     parser.add_argument('--write-candidates-dir', type=Path)
@@ -232,7 +236,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument('--attn-impl', default=None)
     parser.add_argument('--new-special-tokens', default='./special_token_v1.txt')
     parser.add_argument('--output-dir', default='output/fps_probe')
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.max_width < 0:
+        parser.error('--max-width must be non-negative (0 disables resizing)')
+    return args
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
@@ -254,6 +261,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 probe_rows,
                 fps=fps,
                 frame_cache_root=args.frame_cache_root,
+                max_width=args.max_width,
             )
         summary = summarize_candidate(
             fps=fps,
@@ -278,6 +286,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     report = {
         'raw': str(args.raw),
         'target_max_length': args.target_max_length,
+        'frame_max_width': args.max_width,
         'top_k': args.top_k,
         'indices': indices,
         'best_measured_fps': best['fps'] if best else None,

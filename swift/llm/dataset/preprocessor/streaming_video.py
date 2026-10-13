@@ -443,9 +443,13 @@ class VideoFrameExtractor:
         num_workers: int = 8,  # Number of threads for parallel frame saving
         enable_memory_cache: bool = True,  # Enable in-memory caching for repeated access
         frame_tolerance: int = 1,  # Tolerance in frames for count mismatch (at current fps)
+        max_width: Optional[int] = None,  # Preserve aspect ratio; None/0 disables resizing
     ):
+        if max_width is not None and (isinstance(max_width, bool) or not isinstance(max_width, int) or max_width < 0):
+            raise ValueError('max_width must be a non-negative integer or None')
         self.fps = validate_fps(fps)
         self.max_frames = max_frames
+        self.max_width = max_width or None
         self.output_dir = output_dir
         self.use_cache = use_cache
         self.save_frames = save_frames
@@ -455,7 +459,18 @@ class VideoFrameExtractor:
     
     def _get_cache_key(self, video_path: str) -> str:
         """Generate cache key based on video path and extraction parameters."""
-        return f"{video_path}|fps={self.fps}|max={self.max_frames}|sampling={SAMPLING_VERSION}"
+        key = f"{video_path}|fps={self.fps}|max={self.max_frames}|sampling={SAMPLING_VERSION}"
+        if self.max_width is not None:
+            key += f'|resize=width_area_v1|max_width={self.max_width}'
+        return key
+
+    def _resize_frame(self, frame: np.ndarray) -> np.ndarray:
+        """Downscale wide frames without cropping, padding, or upscaling."""
+        height, width = frame.shape[:2]
+        if self.max_width is None or width <= self.max_width:
+            return frame
+        resized_height = max(1, round(height * self.max_width / width))
+        return cv2.resize(frame, (self.max_width, resized_height), interpolation=cv2.INTER_AREA)
     
     def _get_from_cache(self, video_path: str) -> Optional[List[Image.Image]]:
         """Try to get frames from memory cache using LRU cache."""
@@ -509,13 +524,13 @@ class VideoFrameExtractor:
         try:
             if not cap.isOpened():
                 raise ValueError(f'Cannot open video: {video_path}')
-            return [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            return [Image.fromarray(cv2.cvtColor(self._resize_frame(frame), cv2.COLOR_BGR2RGB))
                     for frame in iter_sampled_frames(cap, self._sample_indices(cap))]
         finally:
             cap.release()
 
     def _extract_to_memory_sequential(self, cap: cv2.VideoCapture) -> List[Image.Image]:
-        return [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        return [Image.fromarray(cv2.cvtColor(self._resize_frame(frame), cv2.COLOR_BGR2RGB))
                 for frame in iter_sampled_frames(cap, self._sample_indices(cap), seek=False)]
 
     def _extract_to_files(self, video_path: str) -> List[str]:
@@ -581,7 +596,7 @@ class VideoFrameExtractor:
                     frame_path = os.path.join(frame_dir, f"frame_{saved_idx:06d}.png")
                     frame_paths.append(frame_path)
                     if not self.use_cache or not os.path.exists(frame_path):
-                        frames_to_save.append((frame_path, frame.copy()))
+                        frames_to_save.append((frame_path, self._resize_frame(frame).copy()))
             finally:
                 cap.release()
             
@@ -613,6 +628,7 @@ class VideoFrameExtractor:
                     f.write(f"video_fps={video_fps}\n")
                     f.write(f"extraction_fps={self.fps}\n")
                     f.write(f"sampling={SAMPLING_VERSION}\n")
+                    f.write(f"max_width={self.max_width}\n")
             
             logger.info(
                 f"Extracted {len(frame_paths)} frames from {video_path} "
@@ -685,6 +701,7 @@ class StreamingVideoPreprocessor(RowPreprocessor):
         frame_tolerance: int = 1,  # Tolerance in frames for count mismatch (default: 1 second at 1fps)
         video_resolver: Optional[ArchiveVideoResolver] = None,
         columns: Optional[Dict[str, str]] = None,
+        max_width: Optional[int] = None,
         **kwargs
     ):
         """
@@ -699,6 +716,7 @@ class StreamingVideoPreprocessor(RowPreprocessor):
             frame_tolerance: Allowed difference between extracted frames and expected tokens (default: 1)
             video_resolver: Optional resolver that materializes logical video paths locally
             columns: Column mapping
+            max_width: Maximum extracted frame width; None/0 keeps original size (never upscales)
         """
         super().__init__(columns=columns, **kwargs)
         self._version = SAMPLING_VERSION
@@ -720,6 +738,7 @@ class StreamingVideoPreprocessor(RowPreprocessor):
             num_workers=num_workers,
             enable_memory_cache=enable_memory_cache,
             frame_tolerance=frame_tolerance,
+            max_width=max_width,
         )
     
     def _has_stream_token(self, row: Dict[str, Any]) -> bool:
@@ -905,6 +924,7 @@ class StreamingVideoMessagesPreprocessor(MessagesPreprocessor):
         assistant_role: Optional[str] = None,
         system_role: str = 'system',
         columns: Optional[Dict[str, str]] = None,
+        max_width: Optional[int] = None,
         **kwargs
     ):
         super().__init__(
@@ -928,6 +948,7 @@ class StreamingVideoMessagesPreprocessor(MessagesPreprocessor):
             enable_memory_cache=enable_memory_cache,
             frame_tolerance=frame_tolerance,
             video_resolver=video_resolver,
+            max_width=max_width,
         )
     
     def _has_stream_token(self, row: Dict[str, Any]) -> bool:
@@ -972,6 +993,7 @@ def convert_streaming_video_data(
     fps: float = 1.0,
     output_dir: Optional[str] = None,
     max_frames: Optional[int] = None,
+    max_width: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     Convert streaming video data from <stream> format to <image> format.
@@ -982,6 +1004,7 @@ def convert_streaming_video_data(
         fps: Frames per second to extract
         output_dir: Directory to save frames
         max_frames: Maximum frames per video
+        max_width: Maximum saved frame width; None/0 keeps original size
         
     Returns:
         List of converted samples
@@ -1001,6 +1024,8 @@ def convert_streaming_video_data(
         fps=fps,
         max_frames=max_frames,
         frame_output_dir=output_dir,
+        save_frames=True,
+        max_width=max_width,
     )
     
     results = []
@@ -1031,6 +1056,7 @@ if __name__ == "__main__":
     parser.add_argument("--fps", type=float, default=1.0, help="FPS for extraction")
     parser.add_argument("--output-dir", help="Frame output directory")
     parser.add_argument("--max-frames", type=int, help="Max frames per video")
+    parser.add_argument('--max-width', type=int, default=640, help='Maximum saved frame width; 0 disables resizing')
     
     args = parser.parse_args()
     
@@ -1038,6 +1064,7 @@ if __name__ == "__main__":
         input_path=args.input,
         output_path=args.output,
         fps=args.fps,
+        max_width=args.max_width,
         output_dir=args.output_dir,
         max_frames=args.max_frames,
     )

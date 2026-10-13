@@ -282,6 +282,7 @@ def convert_stream_to_image(
     fps: float = 1.0,
     frame_output_dir: Optional[str] = None,
     max_frames: Optional[int] = None,
+    max_width: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Convert from stream format to image format (extract frames).
@@ -295,6 +296,8 @@ def convert_stream_to_image(
         max_frames=max_frames,
         frame_output_dir=frame_output_dir,
         use_frame_cache=True,
+        save_frames=True,
+        max_width=max_width,
     )
     
     return preprocessor.preprocess(data)
@@ -378,15 +381,16 @@ def batch_convert_to_stream(
 
 
 def _convert_to_image_worker(
-    args: Tuple[int, Dict[str, Any], float, Optional[str], Optional[int]]
+    args: Tuple[int, Dict[str, Any], float, Optional[str], Optional[int], Optional[int]]
 ) -> Tuple[int, Optional[Dict[str, Any]]]:
     """Worker function for parallel to-image conversion."""
-    idx, item, fps, frame_output_dir, max_frames = args
+    idx, item, fps, frame_output_dir, max_frames, max_width = args
     result = convert_stream_to_image(
         item,
         fps=fps,
         frame_output_dir=frame_output_dir,
         max_frames=max_frames,
+        max_width=max_width,
     )
     return idx, result
 
@@ -398,6 +402,7 @@ def batch_convert_to_image(
     frame_output_dir: Optional[str] = None,
     max_frames: Optional[int] = None,
     num_workers: int = 8,
+    max_width: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     Batch convert from stream format to image format with multi-threading.
@@ -413,7 +418,7 @@ def batch_convert_to_image(
     
     # Prepare worker arguments
     worker_args = [
-        (idx, item, fps, frame_output_dir, max_frames)
+        (idx, item, fps, frame_output_dir, max_frames, max_width)
         for idx, item in enumerate(data_list)
     ]
     
@@ -481,9 +486,13 @@ def main():
     image_parser.add_argument('--fps', type=float, default=1.0, help='FPS for frame extraction')
     image_parser.add_argument('--frame-dir', help='Directory to save extracted frames')
     image_parser.add_argument('--max-frames', type=int, help='Maximum frames per video')
+    image_parser.add_argument('--max-width', type=int, default=640,
+                              help='Maximum saved frame width, preserving aspect ratio; 0 disables resizing')
     image_parser.add_argument('--num-workers', type=int, default=8, help='Number of parallel workers')
     
     args = parser.parse_args()
+    if args.command == 'to-image' and args.max_width < 0:
+        image_parser.error('--max-width must be non-negative (0 disables resizing)')
     
     if not args.command:
         parser.print_help()
@@ -505,6 +514,7 @@ def main():
             fps=args.fps,
             frame_output_dir=args.frame_dir,
             max_frames=args.max_frames,
+            max_width=args.max_width,
             num_workers=args.num_workers,
         )
 
